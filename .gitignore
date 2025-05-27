@@ -4,3 +4,8 @@ __pycache__/
 comp_venv/  # Or your virtual environment folder name
 *.tmp       # To ignore any temporary files you might create locally
 *.log       # If you generate local log files
+
+
+# Ignore folders with large/temporary PDFs
+Ref_Files/
+Backend/temp_uploads/
