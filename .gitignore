@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+comp_venv/  # Or your virtual environment folder name
+*.tmp       # To ignore any temporary files you might create locally
+*.log       # If you generate local log files
