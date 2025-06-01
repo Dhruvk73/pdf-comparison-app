@@ -28,8 +28,10 @@ else:
 
 # Import backend processing function
 try:
-    from visual_layout_backend import process_files_for_comparison
+    # MODIFIED IMPORT: Changed 'visual_layout_backend' to 'backend_processor'
+    from backend_processor import process_files_for_comparison 
     BACKEND_AVAILABLE = True
+    logging.info("SUCCESS: backend_processor.process_files_for_comparison imported.")
 except ImportError as e:
     logging.error(f"Failed to import backend_processor: {e}", exc_info=True)
     BACKEND_AVAILABLE = False

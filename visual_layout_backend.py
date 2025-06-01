@@ -16,7 +16,8 @@ from pdf2image import convert_from_path #, pdfinfo_from_path # pdfinfo_from_path
 from PIL import Image
 import base64 # For Vision LLM image encoding
 from werkzeug.utils import secure_filename # Useful for sanitizing filenames for S3 keys if needed
-from PIL import ImageDraw
+from PIL import ImageDraw, ImageFont
+logger = logging.getLogger(__name__)
 
 
 
@@ -1385,119 +1386,106 @@ def compare_product_items(product_items1, product_items2, similarity_threshold=7
 # ... (existing functions) ...
 
 def draw_highlights_on_full_page_v2(full_page_pil_image: Image.Image,
-                                     all_items_on_this_page: list,
-                                     page_comparison_report_items: list,
-                                     file_type: str) -> BytesIO:
+                                      all_items_on_this_page: list,
+                                      page_comparison_report_items: list,
+                                      file_type: str) -> BytesIO:
     """
-    Draws highlights on a full PIL page image based on extracted details and comparison results.
-
-    Args:
-        full_page_pil_image: The full PIL Image object of the page.
-        all_items_on_this_page: List of all product items (with their _bbox fields) found on this page.
-        page_comparison_report_items: Filtered list of comparison report entries relevant to this page.
-        file_type: "file1" or "file2" to determine highlight colors.
-
-    Returns:
-        A BytesIO object containing the JPEG image with highlights.
+    Draws highlights (borders around Roboflow boxes) on a full PIL page image.
+    - Unmatched items get one border color.
+    - Matched items with attribute mismatches get another border color.
     """
     draw = ImageDraw.Draw(full_page_pil_image)
     img_width, img_height = full_page_pil_image.size
 
     # Define colors
-    RED = (255, 0, 0)
-    ORANGE = (255, 165, 0)
-    GREEN = (0, 128, 0)
-    BLUE = (0, 0, 255)
+    # For File 1 (typically displayed on the left)
+    COLOR_MISMATCH_FILE1 = (255, 0, 0)      # Red: Matched item in File 1, but has attribute differences
+    COLOR_UNMATCHED_FILE1 = (255, 165, 0)   # Orange: Item present in File 1, but unmatched in File 2
 
-    HIGHLIGHT_COLOR = RED if file_type == "file1" else GREEN
-    BORDER_COLOR_UNMATCHED = ORANGE if file_type == "file1" else BLUE
-    OUTLINE_WIDTH = max(1, int(min(img_width, img_height) * 0.003)) # Thin outline
+    # For File 2 (typically displayed on the right)
+    COLOR_MISMATCH_FILE2 = (0, 128, 0)      # Green: Matched item in File 2, but has attribute differences
+    COLOR_UNMATCHED_FILE2 = (0, 0, 255)     # Blue: Item present in File 2, but unmatched in File 1 (extra in File 2)
+
+    # Determine current context colors
+    current_mismatch_color = COLOR_MISMATCH_FILE1 if file_type == "file1" else COLOR_MISMATCH_FILE2
+    current_unmatched_color = COLOR_UNMATCHED_FILE1 if file_type == "file1" else COLOR_UNMATCHED_FILE2
+    
+    OUTLINE_WIDTH = max(2, int(min(img_width, img_height) * 0.005)) # Slightly thicker for Roboflow boxes
+
+    logger.debug(f"DRAW_FULL_PAGE_V2 ({file_type}): Processing {len(all_items_on_this_page)} items for page. Report items for this page: {len(page_comparison_report_items)}")
 
     for item_data in all_items_on_this_page:
         item_product_box_id = item_data.get("product_box_id")
-        
+        if not item_product_box_id:
+            logger.warning(f"DRAW_FULL_PAGE_V2 ({file_type}): Item data missing product_box_id. Skipping highlight for this item.")
+            continue
+
         relevant_report_entry = None
         for r_entry in page_comparison_report_items:
+            # Check if the current item (from all_items_on_this_page) corresponds to P1 or P2 in the report entry
             if (file_type == "file1" and r_entry.get("P1_Box_ID") == item_product_box_id) or \
                (file_type == "file2" and r_entry.get("P2_Box_ID") == item_product_box_id):
                 relevant_report_entry = r_entry
                 break
         
         if not relevant_report_entry:
-            # If no report entry, it means it was a perfect match, no highlight needed on the full page
+            # This item was found on the page but is not in the filtered comparison report for this page.
+            # This implies it was a "Product Match - Attributes OK" or otherwise not flagged for highlighting.
+            logger.debug(f"DRAW_FULL_PAGE_V2 ({file_type}): No relevant (highlightable) report entry for {item_product_box_id}. Assuming perfect match or no action needed.")
             continue
 
         comparison_type = relevant_report_entry.get("Comparison_Type", "")
-        differences_text = relevant_report_entry.get("Differences", "")
+        differences_text = relevant_report_entry.get("Differences", "") # String of differences
+        
+        outline_color_to_use = None
+        action_description = "None"
 
-        is_unmatched = ("Unmatched" in comparison_type)
-        has_attribute_mismatch = bool(differences_text)
+        # Determine if the item (in its current file context) is unmatched or mismatched
+        if file_type == "file1":
+            if comparison_type == "Unmatched Product in File 1" or \
+               comparison_type == "Unmatchable Product in File 1 (No Text)":
+                outline_color_to_use = current_unmatched_color # Orange
+                action_description = "Unmatched in File 1"
+            elif comparison_type == "Product Match - Attribute Mismatch" and bool(differences_text):
+                outline_color_to_use = current_mismatch_color # Red
+                action_description = "Attribute Mismatch in File 1 item"
+        elif file_type == "file2":
+            if comparison_type == "Unmatched Product in File 2 (Extra)":
+                outline_color_to_use = current_unmatched_color # Blue
+                action_description = "Unmatched in File 2 (Extra)"
+            elif comparison_type == "Product Match - Attribute Mismatch" and bool(differences_text):
+                # This condition implies that the item from file2 (item_product_box_id)
+                # was part of a matched pair that had differences.
+                outline_color_to_use = current_mismatch_color # Green
+                action_description = "Attribute Mismatch in File 2 item"
+        
+        if outline_color_to_use and item_data.get("roboflow_box_coords_pixels_center_wh"):
+            rf_box_coords = item_data["roboflow_box_coords_pixels_center_wh"]
+            cx_px, cy_px = rf_box_coords['x'], rf_box_coords['y']
+            w_px, h_px = rf_box_coords['width'], rf_box_coords['height']
 
-        # Highlight entire product box if unmatched
-        if is_unmatched and item_data.get("roboflow_box_coords_pixels_center_wh"):
-            rf_box = item_data["roboflow_box_coords_pixels_center_wh"]
-            x_min_rel = (rf_box['x'] - rf_box['width'] / 2.0) / img_width
-            y_min_rel = (rf_box['y'] - rf_box['height'] / 2.0) / img_height
-            x_max_rel = (rf_box['x'] + rf_box['width'] / 2.0) / img_width
-            y_max_rel = (rf_box['y'] + rf_box['height'] / 2.0) / img_height
+            x_min_px = int(cx_px - w_px / 2.0)
+            y_min_px = int(cy_px - h_px / 2.0)
+            x_max_px = int(cx_px + w_px / 2.0)
+            y_max_px = int(cy_px + h_px / 2.0)
+            
+            # Optional: Add a small padding around the box
+            # pad = 2 
+            # x_min_px, y_min_px = max(0, x_min_px - pad), max(0, y_min_px - pad)
+            # x_max_px, y_max_px = min(img_width - 1, x_max_px + pad), min(img_height - 1, y_max_px + pad)
 
-            x_min_px = int(x_min_rel * img_width)
-            y_min_px = int(y_min_rel * img_height)
-            x_max_px = int(x_max_rel * img_width)
-            y_max_px = int(y_max_rel * img_height)
+            if x_min_px < x_max_px and y_min_px < y_max_px: # Ensure valid box
+                draw.rectangle([(x_min_px, y_min_px), (x_max_px, y_max_px)],
+                               outline=outline_color_to_use, width=OUTLINE_WIDTH)
+                logger.debug(f"DRAW_FULL_PAGE_V2 ({file_type}): Drew Roboflow box for {item_product_box_id} ({action_description}) with color {outline_color_to_use}. Coords: ({x_min_px},{y_min_px})-({x_max_px},{y_max_px})")
+            else:
+                logger.warning(f"DRAW_FULL_PAGE_V2 ({file_type}): Invalid Roboflow box coordinates for {item_product_box_id} after calculation. Original: {rf_box_coords}")
 
-            # Add a bit of padding for visibility
-            pad_x = int((x_max_px - x_min_px) * 0.02)
-            pad_y = int((y_max_px - y_min_px) * 0.02)
-            x_min_px -= pad_x
-            y_min_px -= pad_y
-            x_max_px += pad_x
-            y_max_px += pad_y
-
-            draw.rectangle([(x_min_px, y_min_px), (x_max_px, y_max_px)], 
-                           outline=BORDER_COLOR_UNMATCHED, width=OUTLINE_WIDTH * 3)
-            logger.debug(f"Drew unmatched border for {item_product_box_id} with {BORDER_COLOR_UNMATCHED}")
-            continue # If unmatched, just draw the border, don't re-highlight internal attributes
-
-        # If it's a match but has attribute differences, highlight specific attributes
-        if has_attribute_mismatch:
-            fields_to_check = {
-                "offer_price": "Offer Price:",
-                "regular_price": "Regular Price:",
-                "size_quantity_info": "Size:"
-            }
-
-            for field_name, diff_indicator in fields_to_check.items():
-                if diff_indicator in differences_text:
-                    bbox_key = f"{field_name}_bbox"
-                    bbox_data = item_data.get(bbox_key) # This should be the normalized (0-1) bbox from Textract (full page relative)
-                    
-                    if bbox_data and all(k in bbox_data for k in ['x_min', 'y_min', 'x_max', 'y_max']):
-                        try:
-                            x_min_px = int(bbox_data['x_min'] * img_width)
-                            y_min_px = int(bbox_data['y_min'] * img_height)
-                            x_max_px = int(bbox_data['x_max'] * img_width)
-                            y_max_px = int(bbox_data['y_max'] * img_height)
-
-                            # Add a small padding to the bounding box
-                            padding_x = int((x_max_px - x_min_px) * 0.05)
-                            padding_y = int((y_max_px - y_min_px) * 0.05)
-                            
-                            x_min_px = max(0, x_min_px - padding_x)
-                            y_min_px = max(0, y_min_px - padding_y)
-                            x_max_px = min(img_width - 1, x_max_px + padding_x)
-                            y_max_px = min(img_height - 1, y_max_px + padding_y)
-
-                            draw.rectangle([(x_min_px, y_min_px), (x_max_px, y_max_px)], 
-                                           outline=HIGHLIGHT_COLOR, width=OUTLINE_WIDTH)
-                            logger.debug(f"Highlighted {field_name} for {item_product_box_id} on full page with {HIGHLIGHT_COLOR}")
-                        except Exception as e:
-                            logger.warning(f"Error drawing bbox for {field_name} for {item_product_box_id} on full page: {e}. Bbox data: {bbox_data}", exc_info=True)
-                    else:
-                        logger.warning(f"No valid bbox data for {field_name} for {item_product_box_id} despite being flagged for highlighting.")
+        elif outline_color_to_use: # Color was determined, but no Roboflow box coords
+            logger.warning(f"DRAW_FULL_PAGE_V2 ({file_type}): Item {item_product_box_id} was flagged for highlight ({action_description}) but 'roboflow_box_coords_pixels_center_wh' is missing.")
 
     img_byte_arr = BytesIO()
-    full_page_pil_image.save(img_byte_arr, format='JPEG', quality=85)
+    full_page_pil_image.save(img_byte_arr, format='JPEG', quality=90)
     img_byte_arr.seek(0)
     return img_byte_arr
 
