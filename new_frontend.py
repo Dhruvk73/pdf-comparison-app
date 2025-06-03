@@ -1,4 +1,4 @@
-# frontend.py
+# new_frontend.py
 
 import streamlit as st
 import pandas as pd
@@ -28,7 +28,7 @@ else:
 
 # Import backend processing function
 try:
-    from visual_layout_backend import process_files_for_comparison
+    from visual_layout_backend import process_files_for_comparison_with_visual as process_files_for_comparison
     BACKEND_AVAILABLE = True
 except ImportError as e:
     logging.error(f"Failed to import backend_processor: {e}", exc_info=True)
