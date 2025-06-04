@@ -608,10 +608,16 @@ if 'comparison_results' in st.session_state:
     results = st.session_state.comparison_results
 
     if results.get("error"):
-        # Error message already shown by the button logic
-        pass
-    elif not BACKEND_AVAILABLE and not results.get("error"): # Handle case where BACKEND_AVAILABLE was false from start
-        st.error("Backend is not available. Cannot display results.")
+        # The "Compare" button's logic (using status_text) might have already shown an error.
+        # Displaying it more permanently here ensures it's visible.
+        # You can customize this message.
+        st.error(f"An error occurred during the comparison process: {results.get('error')}")
+        
+        # Display the associated message if it exists and provides additional details
+        additional_message = results.get('message')
+        if additional_message and additional_message != results.get('error'):
+            st.caption(f"Details: {additional_message}")
+            
     else:
         # --- Summary Metrics ---
         st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Comparison Summary</h2>", unsafe_allow_html=True)
