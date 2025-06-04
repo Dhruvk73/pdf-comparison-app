@@ -71,16 +71,17 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
         # Ensure the template filenames below match your actual files in that directory.
         
         # Your actual base path for templates
-        template_base_dir = r"C:\Users\khura\OneDrive\Documents\Agentic AI\1. Projects\3. AI Page Comparison\Templates"
+        script_dir = Path(__file__).resolve().parent 
+        template_base_dir = script_dir / "templates" # Relative path
 
         # Replace these with the ACTUAL NAMES of your template files
         actual_template1_filename = "template1.jpg"  
         actual_template2_filename = "template2.jpg"  
         actual_template3_filename = "template3.jpg" 
 
-        template1_path = os.path.join(template_base_dir, actual_template1_filename)
-        template2_path = os.path.join(template_base_dir, actual_template2_filename)
-        template3_path = os.path.join(template_base_dir, actual_template3_filename)
+        template1_path = template_base_dir / actual_template1_filename
+        template2_path = template_base_dir / actual_template2_filename
+        template3_path = template_base_dir / actual_template3_filename
 
         # Check if the template files exist at the specified paths
         missing_templates = []
