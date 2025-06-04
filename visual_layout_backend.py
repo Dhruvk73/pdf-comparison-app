@@ -24,6 +24,45 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ========================================
+# PDF PROCESSING CONFIGURATION
+# ========================================
+
+# Configure poppler path for pdf2image
+POPPLER_PATH = r'C:\Program Files\poppler-0.68.0\bin'  # Default Windows path
+# For other systems, you can modify this path or set it as None to use system PATH
+
+def get_poppler_path():
+    """
+    Get the poppler path for pdf2image conversion.
+    Returns None if poppler is in system PATH or on non-Windows systems.
+    """
+    # Check if running on Windows and if the default path exists
+    if os.name == 'nt':  # Windows
+        if os.path.exists(POPPLER_PATH):
+            return POPPLER_PATH
+        else:
+            # Try some common alternative paths
+            alternative_paths = [
+                r'C:\Program Files\poppler\bin',
+                r'C:\poppler\bin',
+                r'C:\poppler-0.68.0\bin',
+                r'C:\tools\poppler\bin'
+            ]
+            for path in alternative_paths:
+                if os.path.exists(path):
+                    return path
+            
+            # If no path found, print warning but continue (might work if in PATH)
+            print(f"Warning: Poppler not found at {POPPLER_PATH} or alternative paths.")
+            print("Make sure poppler is installed and either:")
+            print("1. Update POPPLER_PATH variable in the script")
+            print("2. Add poppler to your system PATH")
+            return None
+    else:
+        # Non-Windows systems typically have poppler in PATH
+        return None
+
+# ========================================
 # SCRIPT 1: PDF Processing and Ranking
 # ========================================
 
@@ -342,6 +381,13 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print(f"Detection Confidence Threshold: {confidence_threshold}%")  # Show threshold
     print("="*60)
 
+    # Get poppler path
+    poppler_path = get_poppler_path()
+    if poppler_path:
+        print(f"Using poppler path: {poppler_path}")
+    else:
+        print("Using system PATH for poppler")
+
     # Create output structure
     output_path = Path(output_root)
     catalog1_path = output_path / "catalog1"
@@ -367,7 +413,12 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print(f"\nPROCESSING PDF 1: {Path(pdf_path1).name}")
     print("-" * 50)
     try:
-        pages1 = convert_from_path(pdf_path1, dpi=300)
+        # Use poppler_path parameter if available
+        if poppler_path:
+            pages1 = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path)
+        else:
+            pages1 = convert_from_path(pdf_path1, dpi=300)
+        
         results["catalog1_pages"] = len(pages1)
         print(f"Converted PDF 1 to {len(pages1)} pages")
 
@@ -397,7 +448,12 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print(f"\nPROCESSING PDF 2: {Path(pdf_path2).name}")
     print("-" * 50)
     try:
-        pages2 = convert_from_path(pdf_path2, dpi=300)
+        # Use poppler_path parameter if available
+        if poppler_path:
+            pages2 = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path)
+        else:
+            pages2 = convert_from_path(pdf_path2, dpi=300)
+        
         results["catalog2_pages"] = len(pages2)
         print(f"Converted PDF 2 to {len(pages2)} pages")
 
@@ -440,6 +496,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print(f"\nRanking Method Used: {ranking_method}")
     print(f"Small Box Filtering: {'Enabled' if filter_small_boxes else 'Disabled'}")
     print(f"Detection Confidence: {confidence_threshold}%")  # Show threshold
+    print(f"Poppler Path Used: {poppler_path if poppler_path else 'System PATH'}")
 
     return results
 
@@ -1151,7 +1208,7 @@ class PracticalCatalogComparator:
                 model=self.vlm_model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                max_tokens=1800,
+                max_tokens=2000,
                 temperature=0.1
             )
 
@@ -1681,6 +1738,7 @@ def catalog_comparison_pipeline(
     print(f"Detection Confidence: {confidence_threshold}%")
     print(f"Similarity Threshold: {similarity_threshold}")
     print(f"Price Tolerance: ${price_tolerance}")
+    print(f"Poppler Path: {get_poppler_path() if get_poppler_path() else 'System PATH'}")
     print(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
     print("=" * 80)
 
@@ -1870,6 +1928,7 @@ def catalog_comparison_pipeline(
                 "Price Tolerance Used",
                 "Ranking Method Used",
                 "Comparison Method Used",
+                "Poppler Path Used",
                 "Total Errors Encountered"
             ],
             "Value": [
@@ -1885,6 +1944,7 @@ def catalog_comparison_pipeline(
                 f"${price_tolerance}",
                 ranking_method,
                 comparison_method,
+                get_poppler_path() if get_poppler_path() else "System PATH",
                 len(pipeline_results["errors"])
             ]
         }
@@ -1933,6 +1993,7 @@ def catalog_comparison_pipeline(
         print(f"Errors Encountered: {len(pipeline_results['errors'])}")
         print(f"Output Directory: {output_directory}")
         print(f"Final Summary: {final_output_path}")
+        print(f"Poppler Used: {get_poppler_path() if get_poppler_path() else 'System PATH'}")
 
         if pipeline_results["errors"]:
             print(f"\nERRORS ENCOUNTERED:")
@@ -1962,7 +2023,8 @@ def simple_catalog_comparison(
     roboflow_api_key: str = None,
     openai_api_key: str = None,
     roboflow_project: str = "my-first-project-c49lu",
-    roboflow_version: int = 1
+    roboflow_version: int = 1,
+    poppler_path: str = None
 ):
     """
     Simplified function that uses environment variables for API keys if not provided.
@@ -1977,7 +2039,14 @@ def simple_catalog_comparison(
         openai_api_key: OpenAI API key (optional, will use env var)
         roboflow_project: Roboflow project name
         roboflow_version: Roboflow model version
+        poppler_path: Custom poppler path (optional, will use default detection)
     """
+
+    # Set custom poppler path if provided
+    if poppler_path:
+        global POPPLER_PATH
+        POPPLER_PATH = poppler_path
+        print(f"Using custom poppler path: {poppler_path}")
 
     # Get API keys from environment if not provided
     if not roboflow_api_key:
@@ -2001,1040 +2070,24 @@ def simple_catalog_comparison(
         roboflow_version=roboflow_version,
         openai_api_key=openai_api_key
     )
-# backend_processor_visual_enhanced.py
-# This shows exactly how to modify your existing backend_processor.py
 
-# Add these imports to your existing backend_processor.py
-from PIL import ImageDraw, ImageFont
-import tempfile
-import base64
-from pathlib import Path
-import time
-
-# ========================================
-# VISUAL COMPARISON FUNCTIONS TO ADD TO YOUR BACKEND_PROCESSOR.PY
-# ========================================
-
-def create_visual_comparison_for_files(final_product_items_file1, final_product_items_file2, 
-                                     comparison_report, file1_page_data, file2_page_data,
-                                     output_directory: str) -> Dict:
-    """
-    Create visual comparison output for your backend processor.
-    Add this function to your backend_processor.py
-    """
-    logger.info("Creating visual comparison for processed files...")
-    
-    # Create visual output directory
-    visual_dir = Path(output_directory) / "visual_comparison"
-    visual_dir.mkdir(parents=True, exist_ok=True)
-    
-    visual_results = {
-        "side_by_side_comparisons": [],
-        "individual_highlights": [],
-        "summary_dashboard": None,
-        "total_files_generated": 0
-    }
-    
-    # Get number of pages
-    num_pages_file1 = len(file1_page_data["page_pils_list"])
-    num_pages_file2 = len(file2_page_data["page_pils_list"])
-    max_pages = max(num_pages_file1, num_pages_file2)
-    
-    # Create visual comparison for each page
-    for page_idx in range(max_pages):
-        logger.info(f"Creating visual comparison for page {page_idx + 1}")
-        
-        # Filter items for current page
-        page1_items = [item for item in final_product_items_file1 
-                      if item.get("page_idx_for_reprocessing") == page_idx]
-        page2_items = [item for item in final_product_items_file2 
-                      if item.get("page_idx_for_reprocessing") == page_idx]
-        
-        # Filter comparison report for current page
-        page_comparison_items = []
-        for report_item in comparison_report:
-            p1_box_id = report_item.get("P1_Box_ID")
-            p2_box_id = report_item.get("P2_Box_ID")
-            
-            page1_match = any(item.get("product_box_id") == p1_box_id for item in page1_items)
-            page2_match = any(item.get("product_box_id") == p2_box_id for item in page2_items)
-            
-            if page1_match or page2_match:
-                page_comparison_items.append(report_item)
-        
-        if page1_items or page2_items:
-            # Get PIL images for this page
-            page1_pil = file1_page_data["page_pils_list"][page_idx] if page_idx < num_pages_file1 else None
-            page2_pil = file2_page_data["page_pils_list"][page_idx] if page_idx < num_pages_file2 else None
-            
-            # Create side-by-side comparison for this page
-            comparison_path = create_side_by_side_page_comparison(
-                page1_items, page2_items, page_comparison_items,
-                page1_pil, page2_pil, 
-                str(visual_dir / f"page_{page_idx + 1}_comparison.jpg"),
-                f"File1 Page {page_idx + 1}", f"File2 Page {page_idx + 1}"
-            )
-            
-            if comparison_path:
-                visual_results["side_by_side_comparisons"].append(comparison_path)
-                visual_results["total_files_generated"] += 1
-            
-            # Create individual highlights for items with differences
-            individual_highlights = create_individual_item_highlights(
-                page1_items, page2_items, page_comparison_items,
-                page1_pil, page2_pil, str(visual_dir / f"page_{page_idx + 1}_highlights")
-            )
-            
-            visual_results["individual_highlights"].extend(individual_highlights)
-            visual_results["total_files_generated"] += len(individual_highlights)
-    
-    # Create overall summary dashboard
-    summary_path = create_comparison_summary_dashboard(
-        comparison_report, final_product_items_file1, final_product_items_file2,
-        str(visual_dir / "summary_dashboard.jpg")
-    )
-    
-    if summary_path:
-        visual_results["summary_dashboard"] = summary_path
-        visual_results["total_files_generated"] += 1
-    
-    logger.info(f"Visual comparison complete: {visual_results['total_files_generated']} files generated")
-    return visual_results
-
-def create_side_by_side_page_comparison(page1_items, page2_items, page_comparison_items,
-                                      page1_pil, page2_pil, output_path, 
-                                      page1_name, page2_name) -> str:
-    """
-    Create side-by-side comparison of two pages with highlighted differences.
-    Similar to your draw_highlights_on_full_page_v2 but creates comparison layout.
-    """
-    if not page1_items and not page2_items:
-        return None
-    
-    # Configuration
-    max_items = max(len(page1_items), len(page2_items))
-    item_width, item_height = 300, 400
-    padding = 20
-    header_height = 100
-    gap_between_pages = 50
-    
-    # Calculate layout
-    items_per_column = min(4, max_items)
-    columns = (max_items + items_per_column - 1) // items_per_column
-    
-    # Canvas dimensions  
-    page_width = item_width * columns + padding * (columns + 1)
-    canvas_width = page_width * 2 + gap_between_pages
-    canvas_height = header_height + item_height * items_per_column + padding * (items_per_column + 1)
-    
-    # Create canvas
-    canvas = Image.new('RGB', (canvas_width, canvas_height), 'white')
-    draw = ImageDraw.Draw(canvas)
-    
-    # Draw header
-    try:
-        title_font = ImageFont.truetype("arial.ttf", 24)
-        subtitle_font = ImageFont.truetype("arial.ttf", 18)
-    except:
-        title_font = subtitle_font = ImageFont.load_default()
-    
-    # Main title
-    title = f"Page Comparison: {page1_name} vs {page2_name}"
-    bbox = draw.textbbox((0, 0), title, font=title_font)
-    title_width = bbox[2] - bbox[0]
-    draw.text(((canvas_width - title_width) // 2, 10), title, fill='black', font=title_font)
-    
-    # Page labels
-    draw.text((page_width // 4, 50), page1_name, fill='blue', font=subtitle_font)
-    draw.text((page_width + gap_between_pages + page_width // 4, 50), page2_name, fill='blue', font=subtitle_font)
-    
-    # Divider line
-    divider_x = page_width + gap_between_pages // 2
-    draw.line([(divider_x, header_height), (divider_x, canvas_height)], fill='gray', width=3)
-    
-    # Draw items for page 1
-    if page1_items and page1_pil:
-        draw_page_items_with_highlights(
-            canvas, page1_items, page_comparison_items, page1_pil,
-            (padding, header_height, page_width - padding, canvas_height - padding),
-            "file1", items_per_column
-        )
-    
-    # Draw items for page 2
-    if page2_items and page2_pil:
-        draw_page_items_with_highlights(
-            canvas, page2_items, page_comparison_items, page2_pil,
-            (page_width + gap_between_pages + padding, header_height, 
-             canvas_width - padding, canvas_height - padding),
-            "file2", items_per_column
-        )
-    
-    # Add legend
-    add_visual_comparison_legend(canvas, canvas_width, canvas_height)
-    
-    # Save result
-    canvas.save(output_path, "JPEG", quality=95)
-    logger.info(f"Side-by-side comparison saved: {output_path}")
-    return output_path
-
-def draw_page_items_with_highlights(canvas, page_items, comparison_items, page_pil,
-                                  area_bbox, file_type, items_per_column):
-    """
-    Draw items from a page with visual highlighting based on comparison results.
-    Adapted from your existing draw_highlights_on_full_page_v2 function.
-    """
-    area_x, area_y, area_width, area_height = area_bbox
-    available_width = area_width - area_x
-    available_height = area_height - area_y
-    
-    # Calculate item layout
-    item_width = min(280, available_width // max(1, len(page_items) // items_per_column + 1))
-    item_height = min(350, available_height // items_per_column)
-    
-    # Color scheme (same as your backend_processor)
-    colors = {
-        'perfect_match': (0, 255, 0),      # Green
-        'price_mismatch': (255, 165, 0),   # Orange
-        'different_product': (255, 0, 0),  # Red
-        'missing_item': (128, 128, 128),   # Gray
-        'unmatched': (0, 0, 255) if file_type == "file1" else (255, 0, 255)  # Blue/Magenta
-    }
-    
-    for idx, item in enumerate(page_items):
-        # Calculate position
-        row = idx % items_per_column
-        col = idx // items_per_column
-        
-        x = area_x + col * (item_width + 10)
-        y = area_y + row * (item_height + 10)
-        
-        # Find comparison result for this item
-        comparison_status = find_item_comparison_status(item, comparison_items, file_type)
-        border_color = colors.get(comparison_status['type'], colors['perfect_match'])
-        
-        # Get product segment from original page
-        if item.get("roboflow_box_coords_pixels_center_wh"):
-            segment_img = extract_product_segment_from_page(
-                page_pil, item["roboflow_box_coords_pixels_center_wh"]
-            )
-            
-            if segment_img:
-                # Resize segment to fit
-                segment_resized = segment_img.resize((item_width - 10, item_height - 30), 
-                                                   Image.Resampling.LANCZOS)
-                canvas.paste(segment_resized, (x + 5, y + 5))
-        
-        # Draw border based on comparison status
-        draw = ImageDraw.Draw(canvas)
-        border_width = 4
-        for i in range(border_width):
-            draw.rectangle([x + i, y + i, x + item_width - i - 1, y + item_height - i - 1], 
-                          outline=border_color, fill=None)
-        
-        # Add status label
-        status_text = comparison_status['label']
-        try:
-            font = ImageFont.truetype("arial.ttf", 12)
-        except:
-            font = ImageFont.load_default()
-        
-        # Label background
-        draw.rectangle([x, y + item_height - 25, x + item_width, y + item_height], 
-                      fill='white', outline='black')
-        draw.text((x + 5, y + item_height - 22), status_text, fill='black', font=font)
-
-def find_item_comparison_status(item, comparison_items, file_type) -> Dict:
-    """
-    Find the comparison status for an item based on comparison results.
-    """
-    item_box_id = item.get("product_box_id")
-    
-    for comp_item in comparison_items:
-        if file_type == "file1" and comp_item.get("P1_Box_ID") == item_box_id:
-            return analyze_comparison_status(comp_item, "P1")
-        elif file_type == "file2" and comp_item.get("P2_Box_ID") == item_box_id:
-            return analyze_comparison_status(comp_item, "P2")
-    
-    # No comparison found - item is unmatched
-    return {
-        'type': 'unmatched',
-        'label': f'Unmatched in {file_type.upper()}'
-    }
-
-def analyze_comparison_status(comparison_item, position) -> Dict:
-    """
-    Analyze a comparison item to determine visual status.
-    """
-    comparison_type = comparison_item.get("Comparison_Type", "")
-    differences = comparison_item.get("Differences", "")
-    
-    if "Attributes OK" in comparison_type:
-        return {'type': 'perfect_match', 'label': 'Perfect Match'}
-    elif "Price" in differences:
-        return {'type': 'price_mismatch', 'label': 'Price Difference'}
-    elif "Different Product" in comparison_type:
-        return {'type': 'different_product', 'label': 'Different Product'}
-    elif "Size" in differences:
-        return {'type': 'price_mismatch', 'label': 'Size Difference'}
-    elif "Unmatched" in comparison_type:
-        return {'type': 'unmatched', 'label': 'Unmatched'}
-    
-    return {'type': 'perfect_match', 'label': 'Unknown Status'}
-
-def extract_product_segment_from_page(page_pil, box_coords):
-    """
-    Extract product segment from page PIL image using roboflow coordinates.
-    Reuse your existing get_segment_image_bytes logic but return PIL image.
-    """
-    try:
-        cx, cy, w, h = box_coords['x'], box_coords['y'], box_coords['width'], box_coords['height']
-        
-        # Add padding
-        padding_factor = 0.05
-        padding_x = int(w * padding_factor)
-        padding_y = int(h * padding_factor)
-        
-        x_min = int(cx - w / 2) - padding_x
-        y_min = int(cy - h / 2) - padding_y
-        x_max = int(cx + w / 2) + padding_x
-        y_max = int(cy + h / 2) + padding_y
-        
-        # Clamp to image bounds
-        img_width, img_height = page_pil.size
-        x_min = max(0, x_min)
-        y_min = max(0, y_min)
-        x_max = min(img_width, x_max)
-        y_max = min(img_height, y_max)
-        
-        if x_min >= x_max or y_min >= y_max:
-            return None
-        
-        return page_pil.crop((x_min, y_min, x_max, y_max))
-        
-    except Exception as e:
-        logger.error(f"Error extracting product segment: {e}")
-        return None
-
-def create_individual_item_highlights(page1_items, page2_items, page_comparison_items,
-                                    page1_pil, page2_pil, highlights_dir) -> List[str]:
-    """
-    Create individual highlighted images for items with differences.
-    """
-    highlights_path = Path(highlights_dir)
-    highlights_path.mkdir(parents=True, exist_ok=True)
-    
-    highlighted_files = []
-    
-    for comp_item in page_comparison_items:
-        if "INCORRECT" not in comp_item.get("Comparison_Type", ""):
-            continue  # Skip perfect matches
-        
-        differences = comp_item.get("Differences", "").split(';')
-        differences = [d.strip() for d in differences if d.strip()]
-        
-        if not differences:
-            continue
-        
-        # Highlight item from file 1
-        p1_box_id = comp_item.get("P1_Box_ID")
-        if p1_box_id:
-            item1 = next((item for item in page1_items 
-                         if item.get("product_box_id") == p1_box_id), None)
-            if item1 and page1_pil:
-                highlight_path = create_single_item_highlight(
-                    item1, page1_pil, differences, comp_item,
-                    str(highlights_path / f"file1_{item1.get('product_box_id', 'unknown')}.jpg")
-                )
-                if highlight_path:
-                    highlighted_files.append(highlight_path)
-        
-        # Highlight item from file 2
-        p2_box_id = comp_item.get("P2_Box_ID")
-        if p2_box_id:
-            item2 = next((item for item in page2_items 
-                         if item.get("product_box_id") == p2_box_id), None)
-            if item2 and page2_pil:
-                highlight_path = create_single_item_highlight(
-                    item2, page2_pil, differences, comp_item,
-                    str(highlights_path / f"file2_{item2.get('product_box_id', 'unknown')}.jpg")
-                )
-                if highlight_path:
-                    highlighted_files.append(highlight_path)
-    
-    return highlighted_files
-
-def create_single_item_highlight(item, page_pil, differences, comparison_item, output_path) -> str:
-    """
-    Create a highlighted version of a single item showing differences.
-    """
-    try:
-        # Extract product segment
-        if not item.get("roboflow_box_coords_pixels_center_wh"):
-            return None
-        
-        segment_img = extract_product_segment_from_page(
-            page_pil, item["roboflow_box_coords_pixels_center_wh"]
-        )
-        
-        if not segment_img:
-            return None
-        
-        # Determine highlight color
-        if any('Price' in diff for diff in differences):
-            highlight_color = (255, 165, 0)  # Orange
-        elif 'Different Product' in comparison_item.get('Comparison_Type', ''):
-            highlight_color = (255, 0, 0)   # Red
-        else:
-            highlight_color = (255, 165, 0)  # Orange (default)
-        
-        # Add highlighting
-        highlighted_img = add_visual_highlights_to_segment(segment_img, highlight_color, differences)
-        
-        # Save highlighted image
-        highlighted_img.save(output_path, "JPEG", quality=95)
-        return output_path
-        
-    except Exception as e:
-        logger.error(f"Error creating single item highlight: {e}")
-        return None
-
-def add_visual_highlights_to_segment(segment_img, border_color, differences):
-    """
-    Add visual highlighting to a product segment image.
-    """
-    highlighted = segment_img.copy()
-    draw = ImageDraw.Draw(highlighted)
-    
-    # Add colorful border
-    border_width = max(5, int(min(segment_img.width, segment_img.height) * 0.03))
-    for i in range(border_width):
-        draw.rectangle([i, i, segment_img.width-1-i, segment_img.height-1-i], 
-                      outline=border_color, fill=None)
-    
-    # Add difference text overlay
-    if differences:
-        add_difference_text_to_image(draw, highlighted, differences, border_color)
-    
-    return highlighted
-
-def add_difference_text_to_image(draw, image, differences, color):
-    """
-    Add text overlay showing differences on the image.
-    """
-    try:
-        font = ImageFont.truetype("arial.ttf", 14)
-    except:
-        font = ImageFont.load_default()
-    
-    # Create semi-transparent overlay
-    overlay = Image.new('RGBA', image.size, (255, 255, 255, 0))
-    overlay_draw = ImageDraw.Draw(overlay)
-    
-    y_offset = 10
-    for i, diff in enumerate(differences[:3]):  # Show max 3 differences
-        # Truncate long text
-        diff_text = diff[:35] + "..." if len(diff) > 35 else diff
-        
-        # Text background
-        bbox = overlay_draw.textbbox((0, 0), diff_text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-        
-        # Background rectangle with transparency
-        overlay_draw.rectangle([5, y_offset-2, 5+text_width+6, y_offset+text_height+2], 
-                             fill=(255, 255, 255, 200))
-        overlay_draw.rectangle([5, y_offset-2, 5+text_width+6, y_offset+text_height+2], 
-                             outline=color, width=2)
-        
-        # Text
-        overlay_draw.text((7, y_offset), diff_text, fill='black', font=font)
-        y_offset += text_height + 8
-    
-    # Composite overlay onto main image
-    if image.mode != 'RGBA':
-        image = image.convert('RGBA')
-    result = Image.alpha_composite(image, overlay)
-    return result.convert('RGB')
-
-def create_comparison_summary_dashboard(comparison_report, final_items_file1, 
-                                      final_items_file2, output_path) -> str:
-    """
-    Create a summary dashboard showing overall comparison statistics.
-    """
-    # Calculate statistics
-    total_items_file1 = len(final_items_file1)
-    total_items_file2 = len(final_items_file2)
-    total_comparisons = len(comparison_report)
-    
-    perfect_matches = len([r for r in comparison_report if 'Attributes OK' in r.get('Comparison_Type', '')])
-    price_mismatches = len([r for r in comparison_report if 'Price' in r.get('Differences', '')])
-    different_products = len([r for r in comparison_report if 'Different Product' in r.get('Comparison_Type', '')])
-    unmatched_items = len([r for r in comparison_report if 'Unmatched' in r.get('Comparison_Type', '')])
-    
-    # Create dashboard
-    width, height = 900, 700
-    canvas = Image.new('RGB', (width, height), 'white')
-    draw = ImageDraw.Draw(canvas)
-    
-    try:
-        title_font = ImageFont.truetype("arial.ttf", 36)
-        header_font = ImageFont.truetype("arial.ttf", 24)
-        text_font = ImageFont.truetype("arial.ttf", 18)
-        large_font = ImageFont.truetype("arial.ttf", 48)
-    except:
-        title_font = header_font = text_font = large_font = ImageFont.load_default()
-    
-    # Title
-    title = "Catalog Comparison Dashboard"
-    bbox = draw.textbbox((0, 0), title, font=title_font)
-    title_width = bbox[2] - bbox[0]
-    draw.text(((width - title_width) // 2, 20), title, fill='black', font=title_font)
-    
-    # Subtitle
-    subtitle = f"Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}"
-    bbox_sub = draw.textbbox((0, 0), subtitle, font=text_font)
-    sub_width = bbox_sub[2] - bbox_sub[0]
-    draw.text(((width - sub_width) // 2, 70), subtitle, fill='gray', font=text_font)
-    
-    # Statistics in a grid
-    stats = [
-        ("Total Items File 1", total_items_file1, (70, 130, 200), 'blue'),
-        ("Total Items File 2", total_items_file2, (250, 130, 200), 'blue'),
-        ("Total Comparisons", total_comparisons, (450, 130, 200), 'purple'),
-        ("Perfect Matches", perfect_matches, (70, 300, 200), 'green'),
-        ("Price Differences", price_mismatches, (250, 300, 200), 'orange'),
-        ("Different Products", different_products, (450, 300, 200), 'red'),
-        ("Unmatched Items", unmatched_items, (650, 300, 200), 'gray')
-    ]
-    
-    for label, value, (x, y, box_width), color in stats:
-        box_height = 120
-        
-        # Draw box
-        draw.rectangle([x, y, x + box_width, y + box_height], 
-                      fill='white', outline=color, width=3)
-        
-        # Value (large)
-        value_text = str(value)
-        bbox_val = draw.textbbox((0, 0), value_text, font=large_font)
-        val_width = bbox_val[2] - bbox_val[0]
-        draw.text((x + (box_width - val_width) // 2, y + 20), value_text, 
-                 fill=color, font=large_font)
-        
-        # Label (smaller)
-        bbox_label = draw.textbbox((0, 0), label, font=text_font)
-        label_width = bbox_label[2] - bbox_label[0]
-        
-        # Multi-line label if needed
-        if label_width > box_width - 10:
-            words = label.split()
-            mid = len(words) // 2
-            line1 = ' '.join(words[:mid])
-            line2 = ' '.join(words[mid:])
-            
-            bbox1 = draw.textbbox((0, 0), line1, font=text_font)
-            bbox2 = draw.textbbox((0, 0), line2, font=text_font)
-            w1, w2 = bbox1[2] - bbox1[0], bbox2[2] - bbox2[0]
-            
-            draw.text((x + (box_width - w1) // 2, y + 80), line1, fill='black', font=text_font)
-            draw.text((x + (box_width - w2) // 2, y + 100), line2, fill='black', font=text_font)
-        else:
-            draw.text((x + (box_width - label_width) // 2, y + 85), label, fill='black', font=text_font)
-    
-    # Match rate calculation and display
-    if total_comparisons > 0:
-        match_rate = (perfect_matches / total_comparisons) * 100
-        match_text = f"Overall Match Rate: {match_rate:.1f}%"
-        
-        bbox_match = draw.textbbox((0, 0), match_text, font=header_font)
-        match_width = bbox_match[2] - bbox_match[0]
-        
-        # Color based on match rate
-        if match_rate >= 80:
-            rate_color = 'green'
-        elif match_rate >= 60:
-            rate_color = 'orange'
-        else:
-            rate_color = 'red'
-        
-        draw.text(((width - match_width) // 2, height - 80), match_text, 
-                 fill=rate_color, font=header_font)
-        
-        # Progress bar for match rate
-        bar_width = 400
-        bar_height = 20
-        bar_x = (width - bar_width) // 2
-        bar_y = height - 50
-        
-        # Background bar
-        draw.rectangle([bar_x, bar_y, bar_x + bar_width, bar_y + bar_height], 
-                      fill='lightgray', outline='black')
-        
-        # Progress bar
-        progress_width = int((match_rate / 100) * bar_width)
-        draw.rectangle([bar_x, bar_y, bar_x + progress_width, bar_y + bar_height], 
-                      fill=rate_color, outline='black')
-    
-    canvas.save(output_path, "JPEG", quality=95)
-    logger.info(f"Summary dashboard saved: {output_path}")
-    return output_path
-
-def add_visual_comparison_legend(canvas, canvas_width, canvas_height):
-    """
-    Add legend explaining the visual comparison colors.
-    """
-    legend_items = [
-        ('Perfect Match', (0, 255, 0)),
-        ('Price Difference', (255, 165, 0)),
-        ('Different Product', (255, 0, 0)),
-        ('Unmatched File 1', (0, 0, 255)),
-        ('Unmatched File 2', (255, 0, 255))
-    ]
-    
-    draw = ImageDraw.Draw(canvas)
-    
-    try:
-        font = ImageFont.truetype("arial.ttf", 12)
-    except:
-        font = ImageFont.load_default()
-    
-    # Position legend
-    legend_width = 160
-    legend_height = len(legend_items) * 18 + 25
-    legend_x = canvas_width - legend_width - 15
-    legend_y = canvas_height - legend_height - 15
-    
-    # Legend background
-    draw.rectangle([legend_x, legend_y, legend_x + legend_width, legend_y + legend_height],
-                  fill='white', outline='black', width=2)
-    
-    # Legend title
-    draw.text((legend_x + 10, legend_y + 5), "Legend:", fill='black', font=font)
-    
-    # Legend items
-    for i, (label, color) in enumerate(legend_items):
-        item_y = legend_y + 22 + i * 18
-        
-        # Color box
-        draw.rectangle([legend_x + 10, item_y, legend_x + 20, item_y + 10], 
-                      fill=color, outline='black')
-        
-        # Label
-        draw.text((legend_x + 25, item_y - 2), label, fill='black', font=font)
-
-# ========================================
-# MODIFY YOUR EXISTING process_files_for_comparison FUNCTION
-# ========================================
-
-def process_files_for_comparison_with_visual(file1_bytes, file1_name, file2_bytes, file2_name):
-    """
-    Enhanced version of your process_files_for_comparison function that includes visual comparison.
-    Replace your existing function with this enhanced version.
-    """
-    request_id = f"req_{int(time.time())}"
-    logger.info(f"REQUEST_ID: {request_id} - Backend processing with visual comparison started")
-
-    # Your existing processing logic here...
-    # (Keep all your existing code until the final response creation)
-    
-    # [ALL YOUR EXISTING CODE FROM process_files_for_comparison GOES HERE]
-    # ...
-    # Just before creating final_response_dict, add this:
-    
-    try:
-        # Create visual comparison
-        logger.info(f"REQUEST_ID: {request_id} - Creating visual comparison output...")
-        
-        visual_results = create_visual_comparison_for_files(
-            final_product_items_file1,
-            final_product_items_file2,
-            product_centric_comparison_report,
-            file1_page_data,
-            file2_page_data,
-            f"visual_output_{request_id}"
-        )
-        
-        logger.info(f"REQUEST_ID: {request_id} - Visual comparison created: {visual_results['total_files_generated']} files")
-        
-    except Exception as e:
-        logger.error(f"REQUEST_ID: {request_id} - Visual comparison failed: {e}")
-        visual_results = {"error": str(e), "total_files_generated": 0}
-
-    # Create enhanced final response that includes visual comparison
-    final_response_dict = {
-        "message": "Backend processing complete with visual comparison.",
-        "product_items_file1_count": len(final_product_items_file1),
-        "product_items_file2_count": len(final_product_items_file2),
-        "product_comparison_details": product_centric_comparison_report,
-        "report_csv_data": csv_data_string,
-        "all_product_details_file1": final_product_items_file1,
-        "all_product_details_file2": final_product_items_file2,
-        
-        # NEW: Visual comparison results
-        "visual_comparison_results": visual_results,
-        "has_visual_comparison": visual_results.get("total_files_generated", 0) > 0,
-        
-        # NEW: Base64 encoded visual outputs for immediate display
-        "visual_comparison_base64": convert_visual_files_to_base64(visual_results)
-    }
-    
-    return final_response_dict
-
-def convert_visual_files_to_base64(visual_results) -> Dict:
-    """
-    Convert visual comparison files to base64 for immediate display in frontend.
-    """
-    base64_results = {
-        "side_by_side_comparisons": [],
-        "summary_dashboard": None,
-        "total_images": 0
-    }
-    
-    try:
-        # Convert side-by-side comparisons
-        for comparison_path in visual_results.get("side_by_side_comparisons", []):
-            if os.path.exists(comparison_path):
-                with open(comparison_path, "rb") as img_file:
-                    img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
-                    base64_results["side_by_side_comparisons"].append({
-                        "filename": Path(comparison_path).name,
-                        "base64_data": img_base64,
-                        "path": comparison_path
-                    })
-                    base64_results["total_images"] += 1
-        
-        # Convert summary dashboard
-        summary_path = visual_results.get("summary_dashboard")
-        if summary_path and os.path.exists(summary_path):
-            with open(summary_path, "rb") as img_file:
-                img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
-                base64_results["summary_dashboard"] = {
-                    "filename": Path(summary_path).name,
-                    "base64_data": img_base64,
-                    "path": summary_path
-                }
-                base64_results["total_images"] += 1
-        
-        logger.info(f"Converted {base64_results['total_images']} visual files to base64")
-        
-    except Exception as e:
-        logger.error(f"Error converting visual files to base64: {e}")
-        base64_results["error"] = str(e)
-    
-    return base64_results
-
-# ========================================
-# STREAMLIT INTEGRATION EXAMPLE
-# ========================================
-
-def display_visual_comparison_in_streamlit(visual_comparison_base64):
-    """
-    Example function showing how to display visual comparison results in Streamlit.
-    Add this to your Streamlit app.
-    """
-    import streamlit as st
-    
-    if not visual_comparison_base64.get("total_images", 0):
-        st.warning("No visual comparison images generated.")
-        return
-    
-    st.header("📊 Visual Comparison Results")
-    
-    # Display summary dashboard
-    if visual_comparison_base64.get("summary_dashboard"):
-        st.subheader("Summary Dashboard")
-        dashboard_data = visual_comparison_base64["summary_dashboard"]["base64_data"]
-        st.image(f"data:image/jpeg;base64,{dashboard_data}", 
-                caption="Comparison Summary Dashboard", use_column_width=True)
-        
-        # Download button for dashboard
-        st.download_button(
-            label="Download Summary Dashboard",
-            data=base64.b64decode(dashboard_data),
-            file_name="comparison_summary_dashboard.jpg",
-            mime="image/jpeg"
-        )
-    
-    # Display side-by-side comparisons
-    side_by_side = visual_comparison_base64.get("side_by_side_comparisons", [])
-    if side_by_side:
-        st.subheader("Page-by-Page Visual Comparisons")
-        
-        # Create tabs for each page comparison
-        if len(side_by_side) > 1:
-            tabs = st.tabs([f"Page {i+1}" for i in range(len(side_by_side))])
-            
-            for i, (tab, comparison) in enumerate(zip(tabs, side_by_side)):
-                with tab:
-                    st.image(f"data:image/jpeg;base64,{comparison['base64_data']}", 
-                            caption=f"Page {i+1} Comparison", use_column_width=True)
-                    
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.download_button(
-                            label=f"Download Page {i+1} Comparison",
-                            data=base64.b64decode(comparison['base64_data']),
-                            file_name=comparison['filename'],
-                            mime="image/jpeg",
-                            key=f"download_page_{i}"
-                        )
-                    with col2:
-                        if st.button(f"🔍 Analyze Page {i+1}", key=f"analyze_page_{i}"):
-                            st.info("Detailed analysis functionality can be added here")
-        else:
-            # Single page comparison
-            comparison = side_by_side[0]
-            st.image(f"data:image/jpeg;base64,{comparison['base64_data']}", 
-                    caption="Visual Comparison", use_column_width=True)
-            
-            st.download_button(
-                label="Download Visual Comparison",
-                data=base64.b64decode(comparison['base64_data']),
-                file_name=comparison['filename'],
-                mime="image/jpeg"
-            )
-    
-    # Visual comparison insights
-    st.subheader("🔍 Visual Insights")
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.metric("Total Visual Files", visual_comparison_base64["total_images"])
-    with col2:
-        st.metric("Page Comparisons", len(side_by_side))
-    with col3:
-        dashboard_available = "✅" if visual_comparison_base64.get("summary_dashboard") else "❌"
-        st.metric("Summary Dashboard", dashboard_available)
-
-# ========================================
-# USAGE EXAMPLE WITH YOUR EXISTING PIPELINE
-# ========================================
-
-def example_usage_with_visual_comparison():
-    """
-    Example showing how to use the enhanced pipeline with visual comparison.
-    """
-    
-    # Your existing imports and setup
-    # from your_module import process_files_for_comparison_with_visual
-    
-    # Example usage
-    with open("catalog1.pdf", "rb") as f1:
-        file1_bytes = f1.read()
-    
-    with open("catalog2.pdf", "rb") as f2:
-        file2_bytes = f2.read()
-    
-    # Process with visual comparison
-    results = process_files_for_comparison_with_visual(
-        file1_bytes, "catalog1.pdf",
-        file2_bytes, "catalog2.pdf"
-    )
-    
-    # Check if visual comparison was successful
-    if results.get("has_visual_comparison"):
-        print("✅ Visual comparison generated successfully!")
-        
-        visual_results = results["visual_comparison_results"]
-        print(f"Generated files:")
-        print(f"  - Side-by-side comparisons: {len(visual_results['side_by_side_comparisons'])}")
-        print(f"  - Individual highlights: {len(visual_results['individual_highlights'])}")
-        print(f"  - Summary dashboard: {'Yes' if visual_results['summary_dashboard'] else 'No'}")
-        
-        # Access base64 data for immediate display
-        base64_data = results["visual_comparison_base64"]
-        print(f"Base64 images ready for display: {base64_data['total_images']}")
-        
-        # Example: Save base64 images to HTML for viewing
-        create_html_visual_report(base64_data, "visual_comparison_report.html")
-        
-    else:
-        print("❌ Visual comparison failed or not generated")
-        if "error" in results.get("visual_comparison_results", {}):
-            print(f"Error: {results['visual_comparison_results']['error']}")
-
-def create_html_visual_report(base64_data, output_path):
-    """
-    Create an HTML report with embedded base64 images for easy viewing.
-    """
-    html_content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Visual Catalog Comparison Report</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }}
-            .container {{ max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; }}
-            .header {{ text-align: center; margin-bottom: 30px; }}
-            .section {{ margin: 30px 0; }}
-            .comparison-image {{ max-width: 100%; border: 2px solid #ddd; border-radius: 8px; margin: 10px 0; }}
-            .download-btn {{ background: #007bff; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin: 10px 5px; display: inline-block; }}
-            .stats {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }}
-            .stat-box {{ background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }}
-            .legend {{ background: #fff3cd; padding: 15px; border-radius: 8px; margin: 20px 0; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>📊 Visual Catalog Comparison Report</h1>
-                <p>Generated on {time.strftime('%Y-%m-%d %H:%M:%S')}</p>
-            </div>
-            
-            <div class="stats">
-                <div class="stat-box">
-                    <h3>{base64_data['total_images']}</h3>
-                    <p>Total Visual Files</p>
-                </div>
-                <div class="stat-box">
-                    <h3>{len(base64_data.get('side_by_side_comparisons', []))}</h3>
-                    <p>Page Comparisons</p>
-                </div>
-                <div class="stat-box">
-                    <h3>{'✅' if base64_data.get('summary_dashboard') else '❌'}</h3>
-                    <p>Summary Dashboard</p>
-                </div>
-            </div>
-            
-            <div class="legend">
-                <h3>🎨 Color Legend</h3>
-                <p><span style="color: green;">■</span> Perfect Match &nbsp;&nbsp;
-                   <span style="color: orange;">■</span> Price Difference &nbsp;&nbsp;
-                   <span style="color: red;">■</span> Different Product &nbsp;&nbsp;
-                   <span style="color: blue;">■</span> Missing in File 1 &nbsp;&nbsp;
-                   <span style="color: magenta;">■</span> Missing in File 2</p>
-            </div>
-    """
-    
-    # Add summary dashboard
-    if base64_data.get("summary_dashboard"):
-        dashboard = base64_data["summary_dashboard"]
-        html_content += f"""
-            <div class="section">
-                <h2>📈 Summary Dashboard</h2>
-                <img src="data:image/jpeg;base64,{dashboard['base64_data']}" 
-                     class="comparison-image" alt="Summary Dashboard">
-            </div>
-        """
-    
-    # Add page comparisons
-    side_by_side = base64_data.get("side_by_side_comparisons", [])
-    if side_by_side:
-        html_content += """
-            <div class="section">
-                <h2>📋 Page-by-Page Comparisons</h2>
-        """
-        
-        for i, comparison in enumerate(side_by_side):
-            html_content += f"""
-                <div style="margin: 30px 0;">
-                    <h3>Page {i+1} Comparison</h3>
-                    <img src="data:image/jpeg;base64,{comparison['base64_data']}" 
-                         class="comparison-image" alt="Page {i+1} Comparison">
-                </div>
-            """
-        
-        html_content += "</div>"
-    
-    html_content += """
-            <div class="section">
-                <h2>💡 How to Interpret the Visual Comparison</h2>
-                <ul>
-                    <li><strong>Green borders:</strong> Products match perfectly</li>
-                    <li><strong>Orange borders:</strong> Same product with price or attribute differences</li>
-                    <li><strong>Red borders:</strong> Completely different products in same position</li>
-                    <li><strong>Blue/Magenta borders:</strong> Products missing from one catalog</li>
-                </ul>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(html_content)
-    
-    print(f"📄 HTML visual report saved to: {output_path}")
-
-# ========================================
-# FINAL INTEGRATION CHECKLIST
-# ========================================
-
-"""
-INTEGRATION CHECKLIST - How to add visual comparison to your existing code:
-
-1. ✅ Add imports to your backend_processor.py:
-   - from PIL import ImageDraw, ImageFont
-   - import base64
-   - from pathlib import Path
-
-2. ✅ Add all the visual comparison functions to your backend_processor.py:
-   - create_visual_comparison_for_files()
-   - create_side_by_side_page_comparison()
-   - draw_page_items_with_highlights()
-   - create_individual_item_highlights()
-   - create_comparison_summary_dashboard()
-   - convert_visual_files_to_base64()
-
-3. ✅ Replace your process_files_for_comparison function with:
-   - process_files_for_comparison_with_visual()
-
-4. ✅ Update your Streamlit app to display visual results:
-   - Add display_visual_comparison_in_streamlit() function
-   - Call it after processing is complete
-
-5. ✅ Test the integration:
-   - Run with your existing PDF pairs
-   - Check that visual files are generated
-   - Verify base64 encoding works
-   - Test Streamlit display
-
-6. ✅ Optional enhancements:
-   - Add more color coding options
-   - Customize layout and styling
-   - Add interactive features in Streamlit
-   - Create animated comparisons
-
-BENEFITS YOU'LL GET:
-
-✨ Immediate visual feedback on catalog differences
-✨ Color-coded highlighting for different types of mismatches  
-✨ Side-by-side page comparisons for easy analysis
-✨ Summary dashboard with overall statistics
-✨ Individual highlighted images for detailed review
-✨ Base64 encoding for instant display in web interfaces
-✨ HTML reports for sharing with stakeholders
-✨ Seamless integration with your existing pipeline
-
-The visual comparison will make it much easier to:
-- Quickly identify problem areas in catalogs
-- Present results to non-technical stakeholders  
-- Spot patterns in pricing discrepancies
-- Validate the accuracy of your comparison algorithm
-- Create compelling reports for clients
-"""
-
-if __name__ == "__main__":
-    print("Visual Comparison Integration for Backend Processor")
-    print("=" * 60)
-    print("This integration adds powerful visual comparison capabilities")
-    print("to your existing catalog comparison pipeline.")
-    print()
-    print("Key features added:")
-    print("✅ Side-by-side visual comparisons")
-    print("✅ Color-coded difference highlighting") 
-    print("✅ Summary dashboard with statistics")
-    print("✅ Individual item highlights")
-    print("✅ Base64 encoding for web display")
-    print("✅ HTML report generation")
-    print()
-    print("Follow the integration checklist above to add these features!")
 
 if __name__ == "__main__":
     print("=" * 80)
     print("STREAMLINED CATALOG COMPARISON PIPELINE")
     print("=" * 80)
     print("This script provides a complete automated pipeline for catalog comparison.")
+    print()
+    print("POPPLER CONFIGURATION:")
+    poppler_path = get_poppler_path()
+    if poppler_path:
+        print(f"✓ Poppler found at: {poppler_path}")
+    else:
+        print("⚠ Poppler path not found. Using system PATH.")
+        print("  If you encounter PDF conversion errors, please:")
+        print("  1. Install poppler-utils")
+        print("  2. Update POPPLER_PATH variable in the script")
+        print("  3. Or add poppler to your system PATH")
     print()
     print("USAGE:")
     print("1. Set environment variables: ROBOFLOW_API_KEY and OPENAI_API_KEY")
@@ -3046,7 +2099,8 @@ if __name__ == "__main__":
     print('    pdf2_path="/path/to/catalog2.pdf",')
     print('    template1_path="/path/to/template1.jpg",')
     print('    template2_path="/path/to/template2.jpg",')
-    print('    template3_path="/path/to/template3.jpg"')
+    print('    template3_path="/path/to/template3.jpg",')
+    print('    poppler_path="C:/Program Files/poppler-0.68.0/bin"  # Optional')
     print(')')
     print()
     print("Or use the full pipeline function for more control over parameters.")
