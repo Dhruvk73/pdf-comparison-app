@@ -13,6 +13,7 @@ import time
 import tempfile # Added for temporary files
 from pathlib import Path # Added for path manipulation
 
+
 # --- Logging Setup ---
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -71,7 +72,7 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
         # Ensure the template filenames below match your actual files in that directory.
         
         # Your actual base path for templates
-        script_dir = Path(__file__).resolve().parent 
+        app_root_dir = Path(__file__).resolve().parent
         template_base_dir = app_root_dir / "Templates" # Relative path
 
         # Replace these with the ACTUAL NAMES of your template files
