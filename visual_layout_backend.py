@@ -214,59 +214,45 @@ def adaptive_row_detection(boxes, min_boxes_per_row=2):
 
     return ranked_boxes
 
-def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page_prefix="page1",
-                                   filter_small_boxes=True, ranking_method="improved_grid",
-                                   confidence_threshold=25):  # REDUCED from 40 to 25
-    """
-    Extract and rank product boxes from image with improved ranking
+# In SCRIPT 1
 
-    Args:
-        ranking_method: "improved_grid", "adaptive", "kmeans", or "reading_order"
-        confidence_threshold: Detection confidence threshold (default: 25, was 40)
+def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page_prefix="page1",
+                                    filter_small_boxes=True, ranking_method="improved_grid",
+                                    confidence_threshold=25):
+    """
+    Extract product boxes, rank them, save cropped images.
+    Returns the list of ranked box dictionaries and paths to saved cropped files.
+    Visualization is NOT created here.
     """
     # Save PIL image as a temp file for Roboflow
     with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
         temp_img_path = tmp.name
         pil_img.save(temp_img_path, "JPEG")
 
-    print(f"Running Roboflow detection on {page_prefix} with confidence threshold {confidence_threshold}%...")
-    # CHANGED: Using configurable confidence_threshold instead of hardcoded 40
+    # print(f"Running Roboflow detection on {page_prefix} with confidence threshold {confidence_threshold}%...")
     rf_result = roboflow_model.predict(temp_img_path, confidence=confidence_threshold, overlap=30)
-    boxes = rf_result.json().get("predictions", [])
-    print(f"Roboflow detected {len(boxes)} boxes")
+    boxes_from_rf = rf_result.json().get("predictions", [])
+    # print(f"Roboflow detected {len(boxes_from_rf)} boxes for {page_prefix}")
 
-    # Extract box information and filter out small boxes
     sortable_boxes = []
     filtered_count = 0
-
-    for pred in boxes:
+    for pred in boxes_from_rf:
         x, y, w, h = pred["x"], pred["y"], pred["width"], pred["height"]
         cls = pred.get("class", "unknown")
-
-        # Filter out small boxes (banners, headers, small promotional elements)
         if is_valid_product_box(w, h, pil_img.width, pil_img.height):
             sortable_boxes.append({
-                "pred": pred,
-                "center_x": x,
-                "center_y": y,
-                "left": x - w / 2,
-                "top": y - h / 2,
-                "right": x + w / 2,
-                "bottom": y + h / 2,
-                "width": w,
-                "height": h,
-                "class": cls
+                "pred": pred, "center_x": x, "center_y": y,
+                "left": x - w / 2, "top": y - h / 2,
+                "right": x + w / 2, "bottom": y + h / 2,
+                "width": w, "height": h, "class": cls
             })
         else:
             filtered_count += 1
-            print(f"Filtered out small box: {w:.0f}x{h:.0f} at ({x:.0f}, {y:.0f})")
-
-    print(f"Kept {len(sortable_boxes)} valid product boxes, filtered out {filtered_count} small boxes")
+    # print(f"Kept {len(sortable_boxes)} valid product boxes for {page_prefix}, filtered out {filtered_count}")
 
     if not sortable_boxes:
-        print("No valid boxes found!")
         os.remove(temp_img_path)
-        return []
+        return [], [] # Return empty lists if no valid boxes
 
     # Apply selected ranking method
     if ranking_method == "improved_grid":
@@ -278,206 +264,204 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
     else:  # reading_order
         sortable_boxes = rank_by_reading_order(sortable_boxes)
 
-    # Create output folder if it doesn't exist
-    os.makedirs(output_folder, exist_ok=True)
+    os.makedirs(output_folder, exist_ok=True) # For cropped images
 
-    # Save cropped images with ranking
-    saved_files = []
+    saved_cropped_files = []
     for idx, b in enumerate(sortable_boxes):
-        x, y, w, h = b["pred"]["x"], b["pred"]["y"], b["pred"]["width"], b["pred"]["height"]
-
-        # Add some padding to capture full product descriptions
-        padding = 10  # pixels
+        pred_box = b["pred"]
+        x, y, w, h = pred_box["x"], pred_box["y"], pred_box["width"], pred_box["height"]
+        padding = 10
         left = max(0, int(x - w / 2) - padding)
         upper = max(0, int(y - h / 2) - padding)
         right = min(pil_img.width, int(x + w / 2) + padding)
         lower = min(pil_img.height, int(y + h / 2) + padding)
+        
+        if right <= left or lower <= upper: # Check for invalid crop dimensions
+            # print(f"Warning: Invalid crop dimensions for box {idx+1} in {page_prefix}. Skipping crop.")
+            continue
 
         cropped = pil_img.crop((left, upper, right, lower))
         save_path = os.path.join(output_folder, f"{page_prefix}_rank_{idx+1}.jpg")
         cropped.save(save_path, "JPEG")
-        saved_files.append(save_path)
-        print(f"Rank {idx+1}: {save_path} (centroid: {b['center_x']:.1f}, {b['center_y']:.1f})")
+        saved_cropped_files.append(save_path)
 
-    # Create visualization
-    viz_path = os.path.join(output_folder, f"{page_prefix}_ranking_visualization.jpg")
-    create_ranking_visualization(pil_img, sortable_boxes, viz_path)
-
-    # Cleanup temp file
     os.remove(temp_img_path)
-    return saved_files
+    return sortable_boxes, saved_cropped_files
 
-def create_ranking_visualization(pil_img, boxes, output_path):
+# In SCRIPT 1
+
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_product_ranks: Optional[set] = None):
     """
-    Create a visualization showing the ranking order on the original image
+    Create a visualization showing the ranking order on the original image.
+    Highlights issues in red if issue_product_ranks is provided.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
 
     try:
+        # Try to load a common font, fallback to default
         font = ImageFont.truetype("arial.ttf", 30)
-    except:
+    except IOError:
         try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 30)
-        except:
+            font = ImageFont.truetype("DejaVuSans.ttf", 30) # Common on Linux
+        except IOError:
             font = ImageFont.load_default()
+            print("Warning: Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
 
-    # Colors for different rows
-    colors = ["red", "blue", "green", "orange", "purple", "brown", "pink", "gray"]
+    default_box_color = "blue"  # Color for non-issue boxes
+    issue_box_color = "red"    # Color for issue boxes
+    font_color = "black"
+    font_background_color = "yellow"
+
+    if not boxes:
+        print(f"No boxes to visualize for {output_path}. Saving original image.")
+        img_copy.save(output_path, "JPEG", quality=95)
+        return
 
     for idx, box in enumerate(boxes):
-        # Determine row for coloring
-        row_color = colors[idx % len(colors)]
+        current_rank = idx + 1  # Rank is 1-based from the list order
 
-        # Draw bounding box
-        left = int(box["left"])
-        top = int(box["top"])
-        right = int(box["right"])
-        bottom = int(box["bottom"])
+        box_outline_color = default_box_color
+        if issue_product_ranks and current_rank in issue_product_ranks:
+            box_outline_color = issue_box_color
 
-        draw.rectangle([left, top, right, bottom], outline=row_color, width=3)
+        left = int(box.get("left", 0))
+        top = int(box.get("top", 0))
+        right = int(box.get("right", pil_img.width))
+        bottom = int(box.get("bottom", pil_img.height))
 
-        # Draw ranking number with background
-        rank_text = str(idx + 1)
-        bbox = draw.textbbox((0, 0), rank_text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
+        draw.rectangle([left, top, right, bottom], outline=box_outline_color, width=4) # Slightly thicker for visibility
 
-        # Position text at top-left of box with background
+        rank_text = str(current_rank)
+        # Use textbbox for modern PIL to get accurate text size
+        try:
+            text_bbox = draw.textbbox((0, 0), rank_text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+        except AttributeError: # Fallback for older Pillow versions that might not have textbbox
+            text_width, text_height = draw.textsize(rank_text, font=font)
+
+
         text_x = left + 5
         text_y = top + 5
 
-        # Background rectangle
-        draw.rectangle([text_x-3, text_y-3, text_x + text_width + 6, text_y + text_height + 6],
-                      fill="yellow", outline="black", width=1)
-        draw.text((text_x, text_y), rank_text, fill="black", font=font)
-
-        # Draw centroid
-        cx, cy = int(box["center_x"]), int(box["center_y"])
-        draw.ellipse([cx-5, cy-5, cx+5, cy+5], fill=row_color, outline="white", width=2)
+        draw.rectangle(
+            [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
+            fill=font_background_color,
+            outline="black",
+            width=1
+        )
+        draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
 
     img_copy.save(output_path, "JPEG", quality=95)
-    print(f"Ranking visualization saved to: {output_path}")
+    # print(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks)})")
+
+# In SCRIPT 1
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
-                                   ranking_method="improved_grid", filter_small_boxes=True,
-                                   confidence_threshold=25):  # ADDED parameter with default 25
-    """
-    Process two PDFs and save ranked products to separate catalog folders
-
-    Args:
-        pdf_path1: Path to first PDF
-        pdf_path2: Path to second PDF
-        output_root: Base output directory
-        ranking_method: Ranking algorithm to use
-        filter_small_boxes: Whether to filter out small promotional boxes
-        confidence_threshold: Detection confidence threshold (default: 25)
-
-    Returns:
-        Dictionary with paths to both catalogs and summary statistics
-    """
+                                     ranking_method="improved_grid", filter_small_boxes=True,
+                                     confidence_threshold=25): # Removed generate_initial_visualizations
     print("="*60)
-    print("DUAL PDF PROCESSING FOR CATALOG COMPARISON")
-    print(f"Detection Confidence Threshold: {confidence_threshold}%")  # Show threshold
+    print("DUAL PDF PROCESSING - STEP 1 (Box Detection & Cropping)")
+    print(f"Detection Confidence Threshold: {confidence_threshold}%")
     print("="*60)
 
-    # Get poppler path
-    poppler_path = get_poppler_path()
-    if poppler_path:
-        print(f"Using poppler path: {poppler_path}")
-    else:
-        print("Using system PATH for poppler")
+    poppler_path_to_use = get_poppler_path()
+    # ... (logging for poppler path) ...
 
-    # Create output structure
     output_path = Path(output_root)
-    catalog1_path = output_path / "catalog1"
-    catalog2_path = output_path / "catalog2"
-
-    # Create directories
-    catalog1_path.mkdir(parents=True, exist_ok=True)
-    catalog2_path.mkdir(parents=True, exist_ok=True)
+    catalog1_base_path = output_path / "catalog1"
+    catalog2_base_path = output_path / "catalog2"
+    catalog1_base_path.mkdir(parents=True, exist_ok=True)
+    catalog2_base_path.mkdir(parents=True, exist_ok=True)
 
     results = {
-        "catalog1_path": str(catalog1_path),
-        "catalog2_path": str(catalog2_path),
-        "catalog1_files": [],
-        "catalog2_files": [],
+        "catalog1_path": str(catalog1_base_path), # Base path for catalog 1 outputs (page folders)
+        "catalog2_path": str(catalog2_base_path), # Base path for catalog 2 outputs
+        "catalog1_files": [], # List of paths to cropped product images from catalog 1
+        "catalog2_files": [], # List of paths to cropped product images from catalog 2
         "catalog1_pages": 0,
         "catalog2_pages": 0,
         "total_products_catalog1": 0,
         "total_products_catalog2": 0,
-        "confidence_threshold": confidence_threshold  # Store threshold in results
+        "confidence_threshold": confidence_threshold,
+        "page_level_data_catalog1": {}, # Stores {page_num: {'image_pil': PILObject, 'ranked_boxes': list, 'page_folder_path': str}}
+        "page_level_data_catalog2": {},
     }
 
     # Process PDF 1
-    print(f"\nPROCESSING PDF 1: {Path(pdf_path1).name}")
+    print(f"\nPROCESSING PDF 1 (Box Detection): {Path(pdf_path1).name}")
     print("-" * 50)
     try:
-        # Use poppler_path parameter if available
-        if poppler_path:
-            pages1 = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path)
-        else:
-            pages1 = convert_from_path(pdf_path1, dpi=300)
-        
-        results["catalog1_pages"] = len(pages1)
-        print(f"Converted PDF 1 to {len(pages1)} pages")
+        pages1_pil_list = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path_to_use)
+        results["catalog1_pages"] = len(pages1_pil_list)
+        print(f"Converted PDF 1 to {len(pages1_pil_list)} pages")
 
-        for page_num, page_img in enumerate(pages1, 1):
-            page_folder = catalog1_path / f"page_{page_num}"
-            page_folder.mkdir(exist_ok=True)
+        for page_idx, pil_page_image in enumerate(pages1_pil_list):
+            page_num = page_idx + 1
+            page_folder_for_crops = catalog1_base_path / f"page_{page_num}"
+            page_folder_for_crops.mkdir(exist_ok=True)
 
-            print(f"\nProcessing Catalog 1 - Page {page_num}...")
-            saved_files = extract_ranked_boxes_from_image(
-                page_img,
-                roboflow_model=None,  # Will be passed from outside
-                output_folder=str(page_folder),
+            # print(f"\nCatalog 1 - Page {page_num} (Box Detection & Cropping)...")
+            # Note: Roboflow model is passed via GLOBAL_ROBOFLOW_MODEL through main_dual_pdf_processing
+            ranked_boxes_on_page, saved_cropped_on_page = extract_ranked_boxes_from_image(
+                pil_page_image,
+                roboflow_model=None, # Will be picked up by patched function
+                output_folder=str(page_folder_for_crops), # For saving cropped images
                 page_prefix=f"c1_p{page_num}",
                 filter_small_boxes=filter_small_boxes,
                 ranking_method=ranking_method,
-                confidence_threshold=confidence_threshold  # PASS threshold parameter
+                confidence_threshold=confidence_threshold
             )
-            results["catalog1_files"].extend(saved_files)
-            results["total_products_catalog1"] += len(saved_files)
-            print(f"Page {page_num}: {len(saved_files)} products extracted")
+            results["catalog1_files"].extend(saved_cropped_on_page)
+            results["total_products_catalog1"] += len(saved_cropped_on_page)
+            results["page_level_data_catalog1"][page_num] = {
+                'image_pil': pil_page_image, # Store the original PIL image of the page
+                'ranked_boxes': ranked_boxes_on_page, # Store the detected & ranked boxes
+                'page_folder_path': str(page_folder_for_crops) # Path where cropped images for this page are
+            }
+            # print(f"Page {page_num}: {len(saved_cropped_on_page)} product images cropped and data stored.")
 
     except Exception as e:
         print(f"Error processing PDF 1: {e}")
         results["catalog1_error"] = str(e)
 
-    # Process PDF 2
-    print(f"\nPROCESSING PDF 2: {Path(pdf_path2).name}")
+    # Process PDF 2 (similar logic)
+    print(f"\nPROCESSING PDF 2 (Box Detection): {Path(pdf_path2).name}")
     print("-" * 50)
     try:
-        # Use poppler_path parameter if available
-        if poppler_path:
-            pages2 = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path)
-        else:
-            pages2 = convert_from_path(pdf_path2, dpi=300)
-        
-        results["catalog2_pages"] = len(pages2)
-        print(f"Converted PDF 2 to {len(pages2)} pages")
+        pages2_pil_list = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path_to_use)
+        results["catalog2_pages"] = len(pages2_pil_list)
+        print(f"Converted PDF 2 to {len(pages2_pil_list)} pages")
 
-        for page_num, page_img in enumerate(pages2, 1):
-            page_folder = catalog2_path / f"page_{page_num}"
-            page_folder.mkdir(exist_ok=True)
+        for page_idx, pil_page_image in enumerate(pages2_pil_list):
+            page_num = page_idx + 1
+            page_folder_for_crops = catalog2_base_path / f"page_{page_num}"
+            page_folder_for_crops.mkdir(exist_ok=True)
 
-            print(f"\nProcessing Catalog 2 - Page {page_num}...")
-            saved_files = extract_ranked_boxes_from_image(
-                page_img,
-                roboflow_model=None,  # Will be passed from outside
-                output_folder=str(page_folder),
+            # print(f"\nCatalog 2 - Page {page_num} (Box Detection & Cropping)...")
+            ranked_boxes_on_page, saved_cropped_on_page = extract_ranked_boxes_from_image(
+                pil_page_image,
+                roboflow_model=None, # Will be picked by patched function
+                output_folder=str(page_folder_for_crops),
                 page_prefix=f"c2_p{page_num}",
                 filter_small_boxes=filter_small_boxes,
                 ranking_method=ranking_method,
-                confidence_threshold=confidence_threshold  # PASS threshold parameter
+                confidence_threshold=confidence_threshold
             )
-            results["catalog2_files"].extend(saved_files)
-            results["total_products_catalog2"] += len(saved_files)
-            print(f"Page {page_num}: {len(saved_files)} products extracted")
-
+            results["catalog2_files"].extend(saved_cropped_on_page)
+            results["total_products_catalog2"] += len(saved_cropped_on_page)
+            results["page_level_data_catalog2"][page_num] = {
+                'image_pil': pil_page_image,
+                'ranked_boxes': ranked_boxes_on_page,
+                'page_folder_path': str(page_folder_for_crops)
+            }
+            # print(f"Page {page_num}: {len(saved_cropped_on_page)} product images cropped and data stored.")
     except Exception as e:
         print(f"Error processing PDF 2: {e}")
         results["catalog2_error"] = str(e)
+
+    
 
     # Print summary
     print("\n" + "="*60)
@@ -574,57 +558,44 @@ def rank_by_reading_order(boxes):
     return ranked_boxes
 
 # Main function for easy usage
+# In SCRIPT 1
 def main_dual_pdf_processing(pdf_path1, pdf_path2, roboflow_model,
-                            output_root="catalog_comparison", ranking_method="improved_grid",
-                            confidence_threshold=25):  # ADDED parameter with default 25
-    """
-    Main function to process two PDFs with Roboflow model
-
-    Args:
-        pdf_path1: Path to first PDF
-        pdf_path2: Path to second PDF
-        roboflow_model: Initialized Roboflow model
-        output_root: Output directory name
-        ranking_method: Ranking algorithm to use
-        confidence_threshold: Detection confidence threshold (default: 25, was 40)
-
-    Usage:
-        from roboflow import Roboflow
-        rf = Roboflow(api_key="your_key")
-        model = rf.project('project_name').version(1).model
-
-        results = main_dual_pdf_processing(
-            "path/to/pdf1.pdf",
-            "path/to/pdf2.pdf",
-            model,
-            output_root="my_catalogs",
-            confidence_threshold=20  # Even lower threshold
-        )
-    """
-    # Temporarily store the model globally for the extraction function
+                             output_root="catalog_comparison", ranking_method="improved_grid",
+                             confidence_threshold=25): # Removed generate_initial_visualizations
     global GLOBAL_ROBOFLOW_MODEL
     GLOBAL_ROBOFLOW_MODEL = roboflow_model
 
-    # Monkey patch the extract function to use the global model
-    original_extract = extract_ranked_boxes_from_image
+    original_extract = globals().get('extract_ranked_boxes_from_image')
+    # It's good practice to ensure original_extract is not None before proceeding
+    if original_extract is None:
+        # This should not happen if the script is intact
+        raise RuntimeError("extract_ranked_boxes_from_image function not found in globals.")
+
 
     def patched_extract(*args, **kwargs):
         if kwargs.get('roboflow_model') is None:
             kwargs['roboflow_model'] = GLOBAL_ROBOFLOW_MODEL
-        return original_extract(*args, **kwargs)
+        # Ensure original_extract is callable
+        if callable(original_extract):
+            return original_extract(*args, **kwargs)
+        else:
+            # Handle error: original_extract is not what we expect
+            raise TypeError("The original extract_ranked_boxes_from_image is not callable.")
 
-    # Replace the function temporarily
+
     globals()['extract_ranked_boxes_from_image'] = patched_extract
 
     try:
         results = process_dual_pdfs_for_comparison(
             pdf_path1, pdf_path2, output_root, ranking_method,
-            confidence_threshold=confidence_threshold  # PASS threshold parameter
+            confidence_threshold=confidence_threshold
+            # generate_initial_visualizations is removed
         )
         return results
     finally:
-        # Restore original function
         globals()['extract_ranked_boxes_from_image'] = original_extract
+        if 'GLOBAL_ROBOFLOW_MODEL' in globals():
+            del globals()['GLOBAL_ROBOFLOW_MODEL']
 
 # ========================================
 # SCRIPT 2: Image Template Matching
@@ -1885,6 +1856,121 @@ def catalog_comparison_pipeline(
                 print(f"Skipping VLM comparison for page {page_idx} - missing folders")
 
         pipeline_results["step3_vlm_comparison"] = comparison_results
+
+
+        if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"]:
+            vlm_all_pages_data = pipeline_results["step3_vlm_comparison"]
+            logger.info("Updating visualizations with VLM comparison results...")
+
+            # Iterate through each page's VLM results
+            for page_id_key, page_vlm_data in vlm_all_pages_data.items(): # e.g., page_id_key = "page_1"
+                if "error" in page_vlm_data or "results" not in page_vlm_data:
+                    logger.warning(f"Skipping VLM viz update for {page_id_key} due to error or missing results.")
+                    continue
+
+                vlm_results_for_page = page_vlm_data["results"]
+                page_num_match = re.search(r'(\d+)', page_id_key) # Get page number
+                if not page_num_match:
+                    logger.warning(f"Could not extract page number from VLM result key: {page_id_key}")
+                    continue
+                page_num = int(page_num_match.group(1))
+
+                comparison_rows = vlm_results_for_page.get("comparison_rows", [])
+                
+                # Determine issue ranks for catalog 1 and catalog 2 for the current page
+                issue_ranks_cat1 = set()
+                issue_ranks_cat2 = set()
+
+                # The comparison_rows are generated by iterating ranks from 1 to max_rank.
+                # So, the index of the row + 1 gives the rank on the page.
+                for rank_idx, row_data in enumerate(comparison_rows):
+                    current_rank_on_page = rank_idx + 1 
+                    
+                    comparison_status = row_data.get("comparison_result", "")
+                    issue_type = row_data.get("issue_type", "")
+                    details = row_data.get("details", "")
+                    
+                    # Catalog names as used in VLM results (e.g., "Catalog1_Page1")
+                    vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1") 
+                    vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
+
+                    # Check if product from catalog 1 was part of this row's comparison
+                    # (i.e., not reported as "Product Missing" for catalog 1 in this specific row)
+                    product1_in_row_details = row_data.get(f"{vlm_cat1_name}_details", "")
+                    is_product1_present_in_row = not ("Product Missing" in product1_in_row_details if isinstance(product1_in_row_details, str) else True)
+
+                    product2_in_row_details = row_data.get(f"{vlm_cat2_name}_details", "")
+                    is_product2_present_in_row = not ("Product Missing" in product2_in_row_details if isinstance(product2_in_row_details, str) else True)
+
+                    if comparison_status.startswith("INCORRECT"):
+                        if issue_type == "Missing Product":
+                            # If product is missing in Cat1 at this rank
+                            if "missing in " + vlm_cat1_name in details or not is_product1_present_in_row:
+                                # How to highlight a "missing" box is tricky. 
+                                # `create_ranking_visualization` acts on existing detected boxes.
+                                # For now, we assume it means the slot has an issue, but can't draw a box if it wasn't detected.
+                                # If a placeholder box was created, it could be highlighted.
+                                # Let's assume for now if it's missing, there's no box TO highlight for that specific catalog.
+                                pass 
+                            # If product is missing in Cat2 at this rank
+                            if "missing in " + vlm_cat2_name in details or not is_product2_present_in_row:
+                                pass
+                        elif issue_type in ["Different Product", "Price Issue", "Multiple Issues"]:
+                            # These issues apply to the pair, so mark both if present
+                            if is_product1_present_in_row:
+                                issue_ranks_cat1.add(current_rank_on_page)
+                            if is_product2_present_in_row:
+                                issue_ranks_cat2.add(current_rank_on_page)
+                        # Add other issue types if necessary
+                        elif issue_type: # Any other non-empty issue_type that implies an error
+                            if is_product1_present_in_row:
+                                issue_ranks_cat1.add(current_rank_on_page)
+                            if is_product2_present_in_row:
+                                issue_ranks_cat2.add(current_rank_on_page)
+
+
+                # Regenerate visualization for Catalog 1, Page `page_num`
+                if pdf_results and page_num in pdf_results.get("page_level_data_catalog1", {}):
+                    page_info_c1 = pdf_results["page_level_data_catalog1"][page_num]
+                    pil_img_c1 = page_info_c1.get('image_pil')
+                    ranked_boxes_c1 = page_info_c1.get('ranked_boxes')
+                    # Path where cropped images (and thus visualizations) for this page are stored
+                    page_folder_c1 = Path(page_info_c1.get('page_folder_path')) 
+                    
+                    if pil_img_c1 and ranked_boxes_c1 and page_folder_c1.exists():
+                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
+                        viz_output_path_c1 = page_folder_c1 / viz_filename_c1
+                        create_ranking_visualization(
+                            pil_img=pil_img_c1,
+                            boxes=ranked_boxes_c1,
+                            output_path=str(viz_output_path_c1),
+                            issue_product_ranks=issue_ranks_cat1 # Pass the identified issue ranks
+                        )
+                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
+                    else:
+                        logger.warning(f"Could not update viz for Cat1 Page {page_num}, missing PIL/boxes or folder path.")
+
+                # Regenerate visualization for Catalog 2, Page `page_num`
+                if pdf_results and page_num in pdf_results.get("page_level_data_catalog2", {}):
+                    page_info_c2 = pdf_results["page_level_data_catalog2"][page_num]
+                    pil_img_c2 = page_info_c2.get('image_pil')
+                    ranked_boxes_c2 = page_info_c2.get('ranked_boxes')
+                    page_folder_c2 = Path(page_info_c2.get('page_folder_path'))
+
+                    if pil_img_c2 and ranked_boxes_c2 and page_folder_c2.exists():
+                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
+                        viz_output_path_c2 = page_folder_c2 / viz_filename_c2
+                        create_ranking_visualization(
+                            pil_img=pil_img_c2,
+                            boxes=ranked_boxes_c2,
+                            output_path=str(viz_output_path_c2),
+                            issue_product_ranks=issue_ranks_cat2 # Pass the identified issue ranks
+                        )
+                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
+                    else:
+                        logger.warning(f"Could not update viz for Cat2 Page {page_num}, missing PIL/boxes or folder path.")
+        else:
+            logger.info("No VLM comparison results found or step3_vlm_comparison is empty. Visualizations will not be updated with VLM issues.")
 
         # ==============================
         # STEP 4: CONSOLIDATE RESULTS
