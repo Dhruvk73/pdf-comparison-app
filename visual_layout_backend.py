@@ -480,7 +480,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print(f"\nRanking Method Used: {ranking_method}")
     print(f"Small Box Filtering: {'Enabled' if filter_small_boxes else 'Disabled'}")
     print(f"Detection Confidence: {confidence_threshold}%")  # Show threshold
-    print(f"Poppler Path Used: {poppler_path if poppler_path else 'System PATH'}")
+    print(f"Poppler Path Used: {poppler_path_to_use if poppler_path_to_use else 'System PATH'}")
 
     return results
 
