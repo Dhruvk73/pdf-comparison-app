@@ -72,7 +72,7 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
         
         # Your actual base path for templates
         script_dir = Path(__file__).resolve().parent 
-        template_base_dir = script_dir / "templates" # Relative path
+        template_base_dir = app_root_dir / "Templates" # Relative path
 
         # Replace these with the ACTUAL NAMES of your template files
         actual_template1_filename = "template1.jpg"  
@@ -98,7 +98,7 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 error_message += f"- `{mt}`\n"
             error_message += "\nPlease ensure the template files exist at the specified paths and filenames are correct in `new_frontend.py`."
             st.error(error_message)
-            logging.error(f"Missing template files: {', '.join(missing_templates)}")
+            logging.error(f"Missing template files: {', '.join([str(p) for p in missing_templates])}")
             # Optionally, you might want to return an error structure here if templates are critical
             # For now, it will proceed, and the backend will likely handle the missing files (or error out).
             # However, the backend `catalog_comparison_pipeline` expects these paths to be valid.
