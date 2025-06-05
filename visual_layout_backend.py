@@ -403,7 +403,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     try:
         # For PDF 1
         logger.info(f"Converting PDF 1 ({Path(pdf_path1).name}) to images with DPI 200...")
-        pages1_pil_list = convert_from_path(pdf_path1, dpi=200, poppler_path=poppler_path_to_use) # Changed DPI
+        pages1_pil_list = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path_to_use) # Changed DPI
         results["catalog1_pages"] = len(pages1_pil_list)
         logger.info(f"Converted PDF 1 to {len(pages1_pil_list)} pages")
 
