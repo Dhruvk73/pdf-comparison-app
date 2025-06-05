@@ -239,6 +239,8 @@ st.set_page_config(layout="wide", page_title="PDF Comparison App")
 # JavaScript and CSS for interactive zoom functionality
 st.markdown("""
 <script>
+// =============== START: COMMENT OUT JAVASCRIPT FOR ZOOM ===============
+/*
 window.zoomImage = function(imageId, event) {
     event.preventDefault();
     event.stopPropagation();
@@ -252,11 +254,9 @@ window.zoomImage = function(imageId, event) {
         const rect = img.getBoundingClientRect();
         const containerRect = container.getBoundingClientRect();
         
-        // Calculate click position relative to the image
         const x = event.clientX - rect.left;
         const y = event.clientY - rect.top;
         
-        // Calculate the transform origin as percentages
         const originX = (x / rect.width) * 100;
         const originY = (y / rect.height) * 100;
         
@@ -264,8 +264,7 @@ window.zoomImage = function(imageId, event) {
         img.style.transform = 'scale(2)';
         container.classList.add('zoomed');
         
-        // Change icon to zoom out
-        icon.innerHTML = '🔍−'; // Using Unicode minus
+        icon.innerHTML = '🔍−';
         icon.title = 'Click to zoom out';
         
     } else {
@@ -274,14 +273,11 @@ window.zoomImage = function(imageId, event) {
         img.style.transformOrigin = 'center center';
         container.classList.remove('zoomed');
         
-        // Change icon back to zoom in
         icon.innerHTML = '🔍+';
         icon.title = 'Click to zoom in';
-        
     }
 };
 
-// Add event listeners when DOM is ready
 document.addEventListener('DOMContentLoaded', function() {
     function setupZoomListeners() {
         const containers = document.querySelectorAll('.image-display-frame[data-image-id]');
@@ -297,27 +293,27 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
     }
-    setupZoomListeners(); // Initial setup
+    setupZoomListeners();
 
-    // Re-run for Streamlit updates (e.g., after button click and content reload)
-    // Using MutationObserver for better reliability with Streamlit's dynamic content
-    const streamlitAppRoot = document.getElementById('root'); // Streamlit typically renders into a div with id 'root'
+    const streamlitAppRoot = document.getElementById('root');
     if (streamlitAppRoot) {
         const observer = new MutationObserver(function(mutationsList, observer) {
             for(let mutation of mutationsList) {
                 if (mutation.type === 'childList' || mutation.type === 'subtree') {
-                    setupZoomListeners(); // Re-apply listeners if DOM changes
+                    setupZoomListeners();
                     break; 
                 }
             }
         });
         observer.observe(streamlitAppRoot, { childList: true, subtree: true });
-    } else { // Fallback if root element ID changes or is not standard
+    } else { 
         new MutationObserver(() => {
-            const timeoutId = setTimeout(setupZoomListeners, 50); // Debounce
+            const timeoutId = setTimeout(setupZoomListeners, 50);
         }).observe(document.body, {childList: true, subtree: true});
     }
 });
+*/
+// =============== END: COMMENT OUT JAVASCRIPT FOR ZOOM ===============
 </script>
 
 <style>
@@ -364,10 +360,9 @@ document.addEventListener('DOMContentLoaded', function() {
         margin-top: 20px;
         flex-wrap: wrap;
     }
-    .image-display-frame {
-        .image-display-frame {
-        width: 100%; /* CHANGE: Fill the container (the column) */
-        box-sizing: border-box; /* ADDED: Good practice for layout */
+.image-display-frame {
+        width: 100%; 
+        box-sizing: border-box; 
         border: 1px solid #eee;
         padding: 10px;
         border-radius: 8px;
@@ -375,35 +370,34 @@ document.addEventListener('DOMContentLoaded', function() {
         display: flex;
         flex-direction: column;
         align-items: center;
-        position: relative; /* For zoom icon positioning */
-        overflow: hidden; /* Important for zoom effect */
-         f
+        position: relative; 
+        /* overflow: hidden; /* You can keep or remove this. If zoom is gone, it's less critical */
     }
     .image-wrapper {
         width: 100%;
-        height: auto; /* Adjust height dynamically */
-        max-height: 600px; /* Optional: constrain max height */
+        height: auto; /* Ensures height is determined by content */
+        /* max-height: 600px; */ /* REMOVED: This was causing the vertical cutoff */
         display: flex; 
         justify-content: center;
         align-items: center;
         position: relative;
-        overflow: hidden; /* Crucial for transform-origin to work as expected */
+        /* overflow: hidden; /* You can keep or remove this */
         border-radius: 4px;
     }
     .image-display-frame img {
-        display: block; /* Remove extra space below img */
+        display: block;
         max-width: 100%; 
-        max-height: 100%; /* Fill wrapper height */
-        height: auto;    /* Maintain aspect ratio */
-        object-fit: contain; /* Ensure entire image is visible */
+        /* max-height: 100%; */ /* Let height be auto based on aspect ratio and width */
+        height: auto;   
+        object-fit: contain; 
         border-radius: 4px;
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        transition: transform 0.3s ease;
-        cursor: crosshair; /* Indicates clickability for zoom */
+        /* transition: transform 0.3s ease; */ /* REMOVE/COMMENT OUT: Related to zoom */
+        /* cursor: crosshair; */ /* REMOVE/COMMENT OUT: Related to zoom */
     }
-    .image-display-frame.zoomed img {
-        cursor: zoom-out;
-    }
+    /* .image-display-frame.zoomed img { */ /* COMMENT OUT ZOOM RELATED STYLE */
+        /* cursor: zoom-out; */
+    /* } */
     .image-caption {
         font-size: 0.9em;
         color: #666;
@@ -412,7 +406,8 @@ document.addEventListener('DOMContentLoaded', function() {
         font-weight: 500;
     }
     
-    /* Zoom icon styling */
+    /* =============== START: COMMENT OUT CSS FOR ZOOM ICON =============== */
+    /*
     .zoom-icon {
         position: absolute;
         top: 15px;
@@ -432,12 +427,12 @@ document.addEventListener('DOMContentLoaded', function() {
         box-shadow: 0 2px 8px rgba(0,0,0,0.2);
         z-index: 10;
         transition: all 0.2s ease;
-        opacity: 0; /* Hidden by default */
+        opacity: 0; 
         transform: scale(0.8);
-        user-select: none; /* Prevent text selection */
+        user-select: none; 
     }
     
-    .image-display-frame:hover .zoom-icon { /* Show on hover over frame */
+    .image-display-frame:hover .zoom-icon { 
         opacity: 1;
         transform: scale(1);
     }
@@ -452,18 +447,19 @@ document.addEventListener('DOMContentLoaded', function() {
         transform: scale(0.95);
     }
     
-    /* Show zoom icon when zoomed and different style */
     .image-display-frame.zoomed .zoom-icon {
-        opacity: 1; /* Ensure it's visible when zoomed */
-        background-color: rgba(220, 53, 69, 0.9); /* Reddish for zoom out */
+        opacity: 1; 
+        background-color: rgba(220, 53, 69, 0.9); 
         border-color: #dc3545;
-        color: white; /* White icon on red background */
+        color: white; 
     }
     
     .image-display-frame.zoomed .zoom-icon:hover {
-        background-color: #c82333; /* Darker red on hover */
+        background-color: #c82333; 
         color: white;
     }
+    */
+    /* =============== END: COMMENT OUT CSS FOR ZOOM ICON =============== */
 </style>
 """, unsafe_allow_html=True)
 
@@ -606,11 +602,13 @@ if 'comparison_results' in st.session_state:
         highlighted_pages_file1 = st.session_state.get('highlighted_pages_file1', [])
         highlighted_pages_file2 = st.session_state.get('highlighted_pages_file2', [])
 
-        if (highlighted_pages_file1 and any(highlighted_pages_file1)) or \
-           (highlighted_pages_file2 and any(highlighted_pages_file2)): # Check if there are actual images
+        if (highlighted_pages_file1 and any(img for img in highlighted_pages_file1 if img)) or \
+           (highlighted_pages_file2 and any(img for img in highlighted_pages_file2 if img)):
             st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Visual Page Analysis (Ranked Boxes)</h2>", unsafe_allow_html=True)
-            st.markdown(f"<p class='subtitle' style='margin-top:0.25rem; margin-bottom:0.75rem;'>These images show detected product boxes and their ranking order on each page.</p>", unsafe_allow_html=True)
-            st.markdown("<p style='color: #666; font-size: 0.9em; margin-bottom: 1rem;'>💡 Hover over images and click the '🔍+' icon to zoom into specific areas. Click '🔍−' to zoom out.</p>", unsafe_allow_html=True)
+            # REMOVED Zoom Hint:
+            # st.markdown("<p style='color: #666; font-size: 0.9em; margin-bottom: 1rem;'>💡 Hover over images and click the '🔍+' icon to zoom into specific areas. Click '🔍−' to zoom out.</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='subtitle' style='margin-top:0.25rem; margin-bottom:0.75rem;'>These images show detected product boxes and their ranking order on each page (errors highlighted in red).</p>", unsafe_allow_html=True)
+
 
             num_pages_to_display = max(len(highlighted_pages_file1), len(highlighted_pages_file2))
 
@@ -618,17 +616,17 @@ if 'comparison_results' in st.session_state:
                 st.markdown(f"--- \n**Page {page_idx + 1} Analysis**")
                 col1, col2 = st.columns(2)
 
-                image_id_f1 = f"img_f1_p{page_idx}"
-                image_id_f2 = f"img_f2_p{page_idx}"
+                # image_id_f1 = f"img_f1_p{page_idx}" # No longer needed for zoom
+                # image_id_f2 = f"img_f2_p{page_idx}" # No longer needed for zoom
 
                 with col1:
                     if page_idx < len(highlighted_pages_file1) and highlighted_pages_file1[page_idx]:
                         st.markdown(f"""
-                            <div class="image-display-frame" data-image-id="{image_id_f1}">
-                                <div class="zoom-icon" title="Click to zoom in">🔍+</div>
+                            <div class="image-display-frame"> 
+                                
                                 <div class="image-wrapper">
                                     <img src="data:image/jpeg;base64,{highlighted_pages_file1[page_idx]}" 
-                                        alt="{st.session_state.get('file1_name', 'File 1')} Page {page_idx + 1} Visualization">
+                                         alt="{st.session_state.get('file1_name', 'File 1')} Page {page_idx + 1} Visualization">
                                 </div>
                                 <div class="image-caption">{st.session_state.get('file1_name', 'File 1')} - Page {page_idx + 1}</div>
                             </div>
@@ -639,18 +637,17 @@ if 'comparison_results' in st.session_state:
                 with col2:
                     if page_idx < len(highlighted_pages_file2) and highlighted_pages_file2[page_idx]:
                         st.markdown(f"""
-                            <div class="image-display-frame" data-image-id="{image_id_f2}">
-                                <div class="zoom-icon" title="Click to zoom in">🔍+</div>
+                            
                                 <div class="image-wrapper">
                                     <img src="data:image/jpeg;base64,{highlighted_pages_file2[page_idx]}" 
-                                        alt="{st.session_state.get('file2_name', 'File 2')} Page {page_idx + 1} Visualization">
+                                         alt="{st.session_state.get('file2_name', 'File 2')} Page {page_idx + 1} Visualization">
                                 </div>
                                 <div class="image-caption">{st.session_state.get('file2_name', 'File 2')} - Page {page_idx + 1}</div>
                             </div>
                         """, unsafe_allow_html=True)
                     else:
                         st.info(f"No visualization available for {st.session_state.get('file2_name', 'File 2')} - Page {page_idx + 1}.")
-                st.markdown("<br>", unsafe_allow_html=True)
+                st.markdown("<br>", unsafe_allow_html=True) # Adds a little space between page pairs
 
         else:
             st.info("No full-page visualizations (ranked box highlights) available from the backend or images could not be generated/found.")
