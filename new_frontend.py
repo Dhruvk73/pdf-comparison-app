@@ -1,5 +1,3 @@
-# new_frontend.py
-
 import streamlit as st
 import pandas as pd
 import io
@@ -67,9 +65,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
             f.write(file2_bytes)
         logging.info(f"Temporary PDF files created: {pdf1_path}, {pdf2_path}")
 
-        # !!! IMPORTANT: Template file paths are now set to your specified directory.
-        # Ensure the template filenames below match your actual files in that directory.
-
         # Your actual base path for templates
         app_root_dir = Path(__file__).resolve().parent
         template_base_dir = app_root_dir / "Templates" # Relative path
@@ -101,14 +96,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
             logging.error(f"Missing template files: {', '.join([str(p) for p in missing_templates])}")
 
         logging.info(f"Using template files: {template1_path}, {template2_path}, {template3_path}")
-        # COMMENTED OUT: Removed the green success message for templates
-        # st.success(f"""
-        # **Using actual template files for backend processing:**
-        # - `{template1_path}`
-        # - `{template2_path}`
-        # - `{template3_path}`
-        # Ensure these files exist and are the correct templates for your comparison.
-        # """)
 
         try:
             logging.info("Calling backend 'simple_catalog_comparison' function...")
@@ -137,19 +124,17 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 frontend_results_to_display["message"] = "Comparison completed with errors."
                 logging.error(f"Backend pipeline reported errors: {frontend_results_to_display['error']}")
 
-            # Extract product counts from step1_pdf_processing
             if "step1_pdf_processing" in pipeline_results and isinstance(pipeline_results["step1_pdf_processing"], dict):
                 pdf_proc_res = pipeline_results["step1_pdf_processing"]
                 frontend_results_to_display["product_items_file1_count"] = pdf_proc_res.get("total_products_catalog1", 0)
                 frontend_results_to_display["product_items_file2_count"] = pdf_proc_res.get("total_products_catalog2", 0)
 
-                # Extract highlighted pages (ranking visualizations)
                 def get_visualization_images_as_base64(catalog_main_path_str, num_pages, catalog_id_prefix):
                     images_b64 = []
                     logging.info(f"[{catalog_id_prefix}] Attempting to load visualizations. Path: '{catalog_main_path_str}', Expected Pages: {num_pages}")
                     if not catalog_main_path_str or not os.path.exists(catalog_main_path_str):
                         logging.warning(f"[{catalog_id_prefix}] Catalog base path not found or invalid: {catalog_main_path_str}")
-                        return [None] * num_pages # Ensure it returns a list of correct length for all pages
+                        return [None] * num_pages
 
                     catalog_main_path = Path(catalog_main_path_str)
                     for page_num in range(1, num_pages + 1):
@@ -164,10 +149,10 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                                     logging.info(f"[{catalog_id_prefix}] Successfully loaded and encoded Page {page_num} from: {viz_filepath}")
                             except Exception as img_err:
                                 logging.error(f"[{catalog_id_prefix}] Error reading or encoding visualization {viz_filepath} for Page {page_num}: {img_err}")
-                                images_b64.append(None) # Important to append None on error
+                                images_b64.append(None)
                         else:
                             logging.warning(f"[{catalog_id_prefix}] Visualization file NOT FOUND for Page {page_num}: {viz_filepath}")
-                            images_b64.append(None) # Important to append None if not found
+                            images_b64.append(None)
                     logging.info(f"[{catalog_id_prefix}] Finished loading. Total images/placeholders returned: {len(images_b64)}")
                     return images_b64
 
@@ -178,53 +163,13 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                     pdf_proc_res.get("catalog2_path"), pdf_proc_res.get("catalog2_pages", 0), "c2"
                 )
 
-            # COMMENTED OUT: Removed mapping VLM comparison results to CSV and product_comparison_details
-            # all_comparison_issue_rows_for_csv = []
-            # if "step3_vlm_comparison" in pipeline_results and isinstance(pipeline_results["step3_vlm_comparison"], dict):
-            #     vlm_results_by_page = pipeline_results["step3_vlm_comparison"]
-            #     for page_id, page_data in vlm_results_by_page.items():
-            #         if isinstance(page_data, dict) and "results" in page_data and isinstance(page_data["results"], dict):
-            #             page_comparison_rows = page_data["results"].get("comparison_rows", [])
-            #             cat1_name_on_page = page_data["results"].get("catalog1_name", "File1")
-            #             cat2_name_on_page = page_data["results"].get("catalog2_name", "File2")
-
-            #             for row in page_comparison_rows:
-            #                 issue_type = row.get("issue_type", "N/A")
-            #                 if issue_type != "Match Confirmed":
-            #                     p1_details_from_row = row.get(f"{cat1_name_on_page}_details", "N/A")
-            #                     p2_details_from_row = row.get(f"{cat2_name_on_page}_details", "N/A")
-
-            #                     product_name_guess = p1_details_from_row.split(" - ")[0] if p1_details_from_row != "Product Missing" else \
-            #                                          (p2_details_from_row.split(" - ")[0] if p2_details_from_row != "Product Missing" else "Unknown Product")
-
-            #                     all_comparison_issue_rows_for_csv.append({
-            #                         "Product Name": product_name_guess,
-            #                         "Issue Type": issue_type,
-            #                         f"{file1_name} Details": p1_details_from_row,
-            #                         f"{file2_name} Details": p2_details_from_row,
-            #                         "Raw Differences": row.get("details", "N/A"),
-            #                     })
-
-            #             frontend_results_to_display["product_comparison_details"] = all_comparison_issue_rows_for_csv
-
-
-            # if all_comparison_issue_rows_for_csv:
-            #     try:
-            #         csv_df = pd.DataFrame(all_comparison_issue_rows_for_csv)
-            #         frontend_results_to_display["report_csv_data"] = csv_df.to_csv(index=False).encode('utf-8')
-            #     except Exception as df_err:
-            #         logging.error(f"Error creating CSV from comparison rows: {df_err}")
-            #         frontend_results_to_display["report_csv_data"] = "Error generating CSV report.\n".encode('utf-8')
-            # else:
-            #     frontend_results_to_display["report_csv_data"] = "No significant discrepancies found to export.".encode('utf-8')
-
             logging.info("Frontend results processing complete.")
             return frontend_results_to_display
 
         except Exception as pipeline_err:
             logging.error(f"Error during backend pipeline execution or result processing: {pipeline_err}", exc_info=True)
             st.error(f"An error occurred while processing with the backend: {pipeline_err}")
-            return { # Return error structure
+            return {
                 "error": f"Pipeline execution error: {str(pipeline_err)}",
                 "message": "Error during backend processing.",
                 "product_items_file1_count": 0, "product_items_file2_count": 0,
@@ -232,234 +177,75 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 "all_product_details_file1": [], "all_product_details_file2": [],
                 "highlighted_pages_file1": [], "highlighted_pages_file2": []
             }
-# --- END OF MODIFIED SECTION ---
 
 st.set_page_config(layout="wide", page_title="PDF Comparison App")
 
-# JavaScript and CSS for interactive zoom functionality
+# --- CORRECTED CSS SECTION ---
 st.markdown("""
-<script>
-// =============== START: COMMENT OUT JAVASCRIPT FOR ZOOM ===============
-/*
-window.zoomImage = function(imageId, event) {
-    event.preventDefault();
-    event.stopPropagation();
-    
-    const container = document.querySelector('[data-image-id="' + imageId + '"]');
-    const img = container.querySelector('img');
-    const icon = container.querySelector('.zoom-icon');
-    
-    if (!container.classList.contains('zoomed')) {
-        // Zoom in
-        const rect = img.getBoundingClientRect();
-        const containerRect = container.getBoundingClientRect();
-        
-        const x = event.clientX - rect.left;
-        const y = event.clientY - rect.top;
-        
-        const originX = (x / rect.width) * 100;
-        const originY = (y / rect.height) * 100;
-        
-        img.style.transformOrigin = originX + '% ' + originY + '%';
-        img.style.transform = 'scale(2)';
-        container.classList.add('zoomed');
-        
-        icon.innerHTML = '🔍−';
-        icon.title = 'Click to zoom out';
-        
-    } else {
-        // Zoom out
-        img.style.transform = 'scale(1)';
-        img.style.transformOrigin = 'center center';
-        container.classList.remove('zoomed');
-        
-        icon.innerHTML = '🔍+';
-        icon.title = 'Click to zoom in';
-    }
-};
-
-document.addEventListener('DOMContentLoaded', function() {
-    function setupZoomListeners() {
-        const containers = document.querySelectorAll('.image-display-frame[data-image-id]');
-        containers.forEach(container => {
-            const imageId = container.getAttribute('data-image-id');
-            const icon = container.querySelector('.zoom-icon');
-            
-            if (icon && !icon.hasAttribute('data-listener-added')) {
-                icon.addEventListener('click', function(e) {
-                    window.zoomImage(imageId, e);
-                });
-                icon.setAttribute('data-listener-added', 'true');
-            }
-        });
-    }
-    setupZoomListeners();
-
-    const streamlitAppRoot = document.getElementById('root');
-    if (streamlitAppRoot) {
-        const observer = new MutationObserver(function(mutationsList, observer) {
-            for(let mutation of mutationsList) {
-                if (mutation.type === 'childList' || mutation.type === 'subtree') {
-                    setupZoomListeners();
-                    break; 
-                }
-            }
-        });
-        observer.observe(streamlitAppRoot, { childList: true, subtree: true });
-    } else { 
-        new MutationObserver(() => {
-            const timeoutId = setTimeout(setupZoomListeners, 50);
-        }).observe(document.body, {childList: true, subtree: true});
-    }
-});
-*/
-// =============== END: COMMENT OUT JAVASCRIPT FOR ZOOM ===============
-</script>
-
 <style>
     /* General body and app styling */
     body, .stApp {
-        background-color: #ffffff; 
-        font-family: Inter, "Noto Sans", sans-serif; 
+        background-color: #ffffff;
+        font-family: Inter, "Noto Sans", sans-serif;
         color: #141414;
     }
-    /* Header and titles */
-    .header-logo h2, .header-nav-links a, .main-title, .form-label { color: #141414; }
+    /* Main titles and form labels */
+    .main-title { letter-spacing: -0.01em; font-size: 2rem; font-weight: bold; line-height: 1.25; color: #141414; }
     .subtitle { color: #6b7280; }
-    .header-button, .stButton button[kind="primary"] { background-color: #141414; color: #f9fafb; }
-    /* Download button specific styling */
-    button[data-testid="stDownloadButton-button"][key="export_button"] {
-        background-color: #f0f2f6 !important; 
-        color: #141414 !important;
-        border: 1px solid #d0d0d0 !important;
-    }
-    button[data-testid="stDownloadButton-button"][key="export_button"]:hover {
-        background-color: #e0e2e6 !important;
-    }
-    /* DataFrame styling */
-    .stDataFrame table { width: 100%; border-collapse: collapse; }
-    .stDataFrame th, .stDataFrame td { border: 1px solid #ededed; padding: 8px; text-align: left; color: #141414; }
-    .stDataFrame th { background-color: #f5f5f5; }
-    /* Header layout */
-    .header { display: flex; align-items: center; justify-content: space-between; white-space: nowrap; border-bottom: 1px solid #ededed; padding: 0.75rem 2.5rem; background-color: #ffffff;}
-    .header-logo { display: flex; align-items: center; gap: 1rem;}
-    .header-logo svg { width: 1rem; height: 1rem; fill: currentColor;}
-    .header-nav { display: flex; flex: 1; justify-content: flex-end; gap: 2rem;}
-    .header-nav-links { display: flex; align-items: center; gap: 2.25rem;}
-    .main-title { letter-spacing: -0.01em; font-size: 2rem; font-weight: bold; line-height: 1.25;}
-    .form-label { font-size: 1rem; font-weight: 500; line-height: normal; padding-bottom: 0.5rem;}
-    .centered-button-container { display: flex; justify-content: center; margin-top: 1rem; margin-bottom: 1rem;}
-    .stButton>button { min-width: 200px; border-radius: 0.5rem; height: 2.5rem; font-weight: bold; font-size: 0.875rem;}
+    .form-label { font-size: 1rem; font-weight: 500; line-height: normal; padding-bottom: 0.5rem; color: #141414; }
 
-    /* Custom styles for image comparison */
-    .image-comparison-page-container {
-        display: flex;
-        justify-content: space-around;
-        align-items: flex-start;
-        gap: 20px;
-        margin-top: 20px;
-        flex-wrap: wrap;
-    }
-.image-display-frame {
-        width: 100%; 
-        box-sizing: border-box; 
-        border: 1px solid #eee;
-        padding: 10px;
-        border-radius: 8px;
-        background-color: #f9f9f9;
+    /* Button styling */
+    .stButton>button { min-width: 200px; border-radius: 0.5rem; height: 2.5rem; font-weight: bold; font-size: 0.875rem;}
+    .centered-button-container { display: flex; justify-content: center; margin-top: 1rem; margin-bottom: 1rem;}
+    .stButton button[kind="primary"] { background-color: #141414; color: #f9fafb; }
+    
+    /* Styles for the visual comparison display */
+    .image-display-frame {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #e2e8f0; /* Softer border color */
+        padding: 1rem;
+        border-radius: 0.5rem; /* Consistent radius */
+        background-color: #f8fafc; /* Lighter background */
         display: flex;
         flex-direction: column;
         align-items: center;
-        position: relative; 
-        /* overflow: hidden; /* You can keep or remove this. If zoom is gone, it's less critical */
+        margin-bottom: 1rem; /* Space below each frame */
     }
+    
     .image-wrapper {
         width: 100%;
-        height: auto; /* Ensures height is determined by content */
-        /* max-height: 600px; */ /* REMOVED: This was causing the vertical cutoff */
-        display: flex; 
+        height: auto; /* Allow height to be determined by content */
+        display: flex;
         justify-content: center;
         align-items: center;
-        position: relative;
-        /* overflow: hidden; /* You can keep or remove this */
-        border-radius: 4px;
     }
+    
     .image-display-frame img {
         display: block;
-        max-width: 100%; 
-        /* max-height: 100%; */ /* Let height be auto based on aspect ratio and width */
-        height: auto;   
-        object-fit: contain; 
+        max-width: 100%; /* Image will scale with the container width */
+        height: auto;    /* Height adjusts to maintain aspect ratio */
+        object-fit: contain;
         border-radius: 4px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        /* transition: transform 0.3s ease; */ /* REMOVE/COMMENT OUT: Related to zoom */
-        /* cursor: crosshair; */ /* REMOVE/COMMENT OUT: Related to zoom */
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
     }
-    /* .image-display-frame.zoomed img { */ /* COMMENT OUT ZOOM RELATED STYLE */
-        /* cursor: zoom-out; */
-    /* } */
+    
     .image-caption {
         font-size: 0.9em;
-        color: #666;
-        margin-top: 10px;
+        color: #4a5568; /* Darker grey for better readability */
+        margin-top: 1rem;
         text-align: center;
         font-weight: 500;
     }
-    
-    /* =============== START: COMMENT OUT CSS FOR ZOOM ICON =============== */
-    /*
-    .zoom-icon {
-        position: absolute;
-        top: 15px;
-        right: 15px;
-        background-color: rgba(255, 255, 255, 0.9);
-        border: 2px solid #007bff;
-        border-radius: 50%;
-        width: 35px;
-        height: 35px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        cursor: pointer;
-        font-size: 16px;
-        font-weight: bold;
-        color: #007bff;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        z-index: 10;
-        transition: all 0.2s ease;
-        opacity: 0; 
-        transform: scale(0.8);
-        user-select: none; 
+
+    /* Page analysis header */
+    .page-analysis-header {
+        font-size: 1.25rem;
+        font-weight: 600;
+        text-align: center;
+        margin-top: 2rem;
+        margin-bottom: 1rem;
     }
-    
-    .image-display-frame:hover .zoom-icon { 
-        opacity: 1;
-        transform: scale(1);
-    }
-    
-    .zoom-icon:hover {
-        background-color: #007bff;
-        color: white;
-        transform: scale(1.1);
-    }
-    
-    .zoom-icon:active {
-        transform: scale(0.95);
-    }
-    
-    .image-display-frame.zoomed .zoom-icon {
-        opacity: 1; 
-        background-color: rgba(220, 53, 69, 0.9); 
-        border-color: #dc3545;
-        color: white; 
-    }
-    
-    .image-display-frame.zoomed .zoom-icon:hover {
-        background-color: #c82333; 
-        color: white;
-    }
-    */
-    /* =============== END: COMMENT OUT CSS FOR ZOOM ICON =============== */
 </style>
 """, unsafe_allow_html=True)
 
@@ -487,11 +273,9 @@ if st.button("Compare", key="compare_button_main", type="primary"):
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Clear previous results from session state
-        for key in ['comparison_results', 'table_data_for_display', 'csv_export_content', 
-                    'highlighted_pages_file1', 'highlighted_pages_file2', 
-                    'file1_bytes', 'file1_name', 'file2_bytes', 'file2_name']:
-            if key in st.session_state:
+        # Clear previous results
+        for key in st.session_state.keys():
+            if key.startswith('comparison_') or key.startswith('highlighted_') or key.startswith('file_'):
                 del st.session_state[key]
         
         try:
@@ -500,47 +284,24 @@ if st.button("Compare", key="compare_button_main", type="primary"):
             st.session_state.file1_name = uploaded_file1.name
             st.session_state.file2_name = uploaded_file2.name
 
-            progress_bar.progress(5)
-            status_text.text("✅ Files loaded. Preparing for backend processing...")
-            time.sleep(0.2)
-
-            with st.spinner("⏳ Processing files with backend and generating comparison... This may take several minutes."):
-                progress_bar.progress(15)
+            with st.spinner("⏳ Processing files and generating comparison... This may take several minutes."):
                 status_text.text("Calling backend for analysis...")
+                progress_bar.progress(15)
                 
                 results = process_files_for_comparison(
                     st.session_state.file1_bytes, st.session_state.file1_name,
                     st.session_state.file2_bytes, st.session_state.file2_name
                 )
                 st.session_state.comparison_results = results
-                
-                # Ensure these keys exist in results even if empty, to avoid KeyErrors later
                 st.session_state.highlighted_pages_file1 = results.get("highlighted_pages_file1", [])
                 st.session_state.highlighted_pages_file2 = results.get("highlighted_pages_file2", [])
-                st.session_state.csv_export_content = results.get("report_csv_data", b"No CSV data available.\n")
                 logging.info("Backend call finished. Results stored in session state.")
-
-                logging.info(f"Data for PDF1 in session state: {len(st.session_state.highlighted_pages_file1)} items. First item type: {type(st.session_state.highlighted_pages_file1[0]) if st.session_state.highlighted_pages_file1 else 'N/A'}")
-                logging.info(f"Data for PDF2 in session state: {len(st.session_state.highlighted_pages_file2)} items. First item type: {type(st.session_state.highlighted_pages_file2[0]) if st.session_state.highlighted_pages_file2 else 'N/A'}")
-                if st.session_state.highlighted_pages_file2 and st.session_state.highlighted_pages_file2[0] is None:
-                        logging.warning("First visualization for PDF2 in session state is None.")
-
-            # --- NEW Intermediate Status ---
-            status_text.text("⏳ Preparing visualizations for display...")
-            progress_bar.progress(95) # Indicate that most work is done
-            time.sleep(0.1) # Allow UI to update the status text
-            # --- END NEW Intermediate Status ---
 
             progress_bar.progress(100)
             if results and results.get("error"):
                 status_text.error(f"Comparison Error: {results.get('error')}")
-                st.error(f"Details: {results.get('message', 'No additional details.')}")
-            elif not BACKEND_AVAILABLE: # Assuming BACKEND_AVAILABLE is correctly set
-                status_text.error("Backend processor module is not available. Please check the application setup.")
             else:
                 status_text.success("🎉 Comparison Complete! Results are ready below.")
-            # Consider removing or shortening time.sleep(1) if not desired
-            # time.sleep(1) 
 
         except Exception as e:
             st.error(f"An unexpected error occurred in the frontend: {str(e)}")
@@ -558,99 +319,64 @@ if 'comparison_results' in st.session_state:
 
     if results.get("error"):
         st.error(f"An error occurred during the comparison process: {results.get('error')}")
-        additional_message = results.get('message')
-        if additional_message and additional_message != results.get('error'):
-            st.caption(f"Details: {additional_message}")
-            
     else:
         # --- Summary Metrics ---
         st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Comparison Summary</h2>", unsafe_allow_html=True)
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric(label=f"Products in {st.session_state.get('file1_name', 'File 1')}", value=results.get("product_items_file1_count", "N/A"))
         col_m2.metric(label=f"Products in {st.session_state.get('file2_name', 'File 2')}", value=results.get("product_items_file2_count", "N/A"))
-        
-        # Count issues (as per original logic, though CSV is removed)
-        num_issues = 0
-        if "product_comparison_details" in results and isinstance(results["product_comparison_details"], list):
-            num_issues = len(results["product_comparison_details"])
-
-        col_m3.metric(label="Discrepancies / Items of Interest", value=num_issues)
-
-        # COMMENTED OUT: Removed the CSV Export Button section entirely
-        # if 'csv_export_content' in st.session_state and st.session_state.csv_export_content:
-        #     try:
-        #         csv_string_check = st.session_state.csv_export_content
-        #         if isinstance(csv_string_check, bytes):
-        #             csv_string_check = csv_string_check.decode('utf-8')
-                
-        #         if "No issues to export." not in csv_string_check and "No significant discrepancies found to export." not in csv_string_check and "No comparison details to export." not in csv_string_check and len(csv_string_check.splitlines()) > 1 :
-        #             st.download_button(
-        #                 label="📥 Export Discrepancies Report (CSV)",
-        #                 data=st.session_state.csv_export_content,
-        #                 file_name=f"comparison_report_{st.session_state.get('file1_name', 'f1')}_vs_{st.session_state.get('file2_name', 'f2')}.csv",
-        #                 mime="text/csv",
-        #                 key="export_button"
-        #             )
-        #         else:
-        #             st.info("No significant discrepancies were found to include in the CSV export.")
-        #     except Exception as e_csv_btn:
-        #         st.error(f"Could not prepare download button: {e_csv_btn}")
-        #         logging.error(f"Error with CSV download button content: {e_csv_btn}")
-
+        num_issues = len(results.get("product_comparison_details", []))
+        col_m3.metric(label="Discrepancies Found", value=num_issues)
 
         # --- Visual Comparison Section (Full Pages) ---
         highlighted_pages_file1 = st.session_state.get('highlighted_pages_file1', [])
         highlighted_pages_file2 = st.session_state.get('highlighted_pages_file2', [])
 
-        if (highlighted_pages_file1 and any(img for img in highlighted_pages_file1 if img)) or \
-           (highlighted_pages_file2 and any(img for img in highlighted_pages_file2 if img)):
-            st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Visual Page Analysis (Ranked Boxes)</h2>", unsafe_allow_html=True)
-            # REMOVED Zoom Hint:
-            # st.markdown("<p style='color: #666; font-size: 0.9em; margin-bottom: 1rem;'>💡 Hover over images and click the '🔍+' icon to zoom into specific areas. Click '🔍−' to zoom out.</p>", unsafe_allow_html=True)
-            st.markdown(f"<p class='subtitle' style='margin-top:0.25rem; margin-bottom:0.75rem;'>These images show detected product boxes and their ranking order on each page (errors highlighted in red).</p>", unsafe_allow_html=True)
-
+        if (highlighted_pages_file1 and any(img for img in highlighted_pages_file1)) or \
+           (highlighted_pages_file2 and any(img for img in highlighted_pages_file2)):
+            
+            st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:2.5rem; margin-bottom:0.5rem;'>Visual Page Analysis</h2>", unsafe_allow_html=True)
+            st.markdown(f"<p class='subtitle' style='margin-bottom:1.5rem;'>Detected product boxes are shown for each page. Errors are highlighted in red.</p>", unsafe_allow_html=True)
 
             num_pages_to_display = max(len(highlighted_pages_file1), len(highlighted_pages_file2))
 
             for page_idx in range(num_pages_to_display):
-                st.markdown(f"--- \n**Page {page_idx + 1} Analysis**")
+                st.markdown("---")
+                st.markdown(f"<p class='page-analysis-header'>Page {page_idx + 1} Analysis</p>", unsafe_allow_html=True)
+                
                 col1, col2 = st.columns(2)
 
-                # image_id_f1 = f"img_f1_p{page_idx}" # No longer needed for zoom
-                # image_id_f2 = f"img_f2_p{page_idx}" # No longer needed for zoom
-
+                # --- CORRECTED HTML/Markdown for PDF 1 ---
                 with col1:
                     if page_idx < len(highlighted_pages_file1) and highlighted_pages_file1[page_idx]:
                         st.markdown(f"""
-                            <div class="image-display-frame"> 
-                                
+                            <div class="image-display-frame">
                                 <div class="image-wrapper">
-                                    <img src="data:image/jpeg;base64,{highlighted_pages_file1[page_idx]}" 
+                                    <img src="data:image/jpeg;base64,{highlighted_pages_file1[page_idx]}"
                                          alt="{st.session_state.get('file1_name', 'File 1')} Page {page_idx + 1} Visualization">
                                 </div>
-                                <div class="image-caption">{st.session_state.get('file1_name', 'File 1')} - Page {page_idx + 1}</div>
+                                <div class="image-caption">{st.session_state.get('file1_name', 'File 1')}</div>
                             </div>
                         """, unsafe_allow_html=True)
                     else:
                         st.info(f"No visualization available for {st.session_state.get('file1_name', 'File 1')} - Page {page_idx + 1}.")
-                
+
+                # --- CORRECTED HTML/Markdown for PDF 2 ---
                 with col2:
                     if page_idx < len(highlighted_pages_file2) and highlighted_pages_file2[page_idx]:
                         st.markdown(f"""
-                            
+                            <div class="image-display-frame">
                                 <div class="image-wrapper">
-                                    <img src="data:image/jpeg;base64,{highlighted_pages_file2[page_idx]}" 
+                                    <img src="data:image/jpeg;base64,{highlighted_pages_file2[page_idx]}"
                                          alt="{st.session_state.get('file2_name', 'File 2')} Page {page_idx + 1} Visualization">
                                 </div>
-                                <div class="image-caption">{st.session_state.get('file2_name', 'File 2')} - Page {page_idx + 1}</div>
+                                <div class="image-caption">{st.session_state.get('file2_name', 'File 2')}</div>
                             </div>
                         """, unsafe_allow_html=True)
                     else:
                         st.info(f"No visualization available for {st.session_state.get('file2_name', 'File 2')} - Page {page_idx + 1}.")
-                st.markdown("<br>", unsafe_allow_html=True) # Adds a little space between page pairs
-
         else:
-            st.info("No full-page visualizations (ranked box highlights) available from the backend or images could not be generated/found.")
+            st.info("No full-page visualizations were generated by the backend.")
             logging.info("No highlighted pages data to display.")
 else:
     st.markdown("<div style='text-align:center; margin-top:1rem; margin-bottom:1rem;'>", unsafe_allow_html=True)
@@ -659,4 +385,4 @@ else:
 
 # Footer
 st.markdown("---")
-st.markdown("<p style='text-align: center; color: #6b7280; font-size: 0.875rem;'>© PDF Comparison Tool.</p>", unsafe_allow_html=True) # Placeholder company name
+st.markdown("<p style='text-align: center; color: #6b7280; font-size: 0.875rem;'>© PDF Comparison Tool.</p>", unsafe_allow_html=True)
