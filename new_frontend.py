@@ -246,6 +246,11 @@ st.markdown("""
         margin-top: 2rem;
         margin-bottom: 1rem;
     }
+            
+    /* Override Streamlit success message text color */
+    div[data-testid="stAlert"][kind="success"] p {
+        color: #000000 !important; /* Black text color */
+    }
 </style>
 """, unsafe_allow_html=True)
 
