@@ -402,7 +402,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print("-" * 50)
     try:
         # For PDF 1
-        logger.info(f"Converting PDF 1 ({Path(pdf_path1).name}) to images with DPI 200...")
+        logger.info(f"Converting PDF 1 ({Path(pdf_path1).name}) to images with DPI 300...")
         pages1_pil_list = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path_to_use) # Changed DPI
         results["catalog1_pages"] = len(pages1_pil_list)
         logger.info(f"Converted PDF 1 to {len(pages1_pil_list)} pages")
@@ -441,7 +441,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print("-" * 50)
     try:
     # For PDF 2
-        logger.info(f"Converting PDF 2 ({Path(pdf_path2).name}) to images with DPI 200...")
+        logger.info(f"Converting PDF 2 ({Path(pdf_path2).name}) to images with DPI 300...")
         pages2_pil_list = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path_to_use) # Changed DPI
         results["catalog2_pages"] = len(pages2_pil_list)
         logger.info(f"Converted PDF 2 to {len(pages2_pil_list)} pages")
@@ -1927,7 +1927,7 @@ def catalog_comparison_pipeline(
                                 issue_ranks_cat2.add(current_rank_on_page)
                         
                         # This part was already correct. It handles issues where both products exist but are different.
-                        elif issue_type in ["Different Product", "Price Issue", "Multiple Issues"]:
+                        elif issue_type in ["Different Product", "Price Difference", "Multiple Issues"]:
                             issue_ranks_cat1.add(current_rank_on_page)
                             issue_ranks_cat2.add(current_rank_on_page)
 
