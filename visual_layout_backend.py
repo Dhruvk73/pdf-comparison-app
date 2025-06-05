@@ -442,7 +442,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     try:
     # For PDF 2
         logger.info(f"Converting PDF 2 ({Path(pdf_path2).name}) to images with DPI 200...")
-        pages2_pil_list = convert_from_path(pdf_path2, dpi=200, poppler_path=poppler_path_to_use) # Changed DPI
+        pages2_pil_list = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path_to_use) # Changed DPI
         results["catalog2_pages"] = len(pages2_pil_list)
         logger.info(f"Converted PDF 2 to {len(pages2_pil_list)} pages")
 
@@ -1915,30 +1915,21 @@ def catalog_comparison_pipeline(
                     is_product2_present_in_row = not ("Product Missing" in product2_in_row_details if isinstance(product2_in_row_details, str) else True)
 
                     if comparison_status.startswith("INCORRECT"):
+                        # --- START: CORRECTED LOGIC ---
                         if issue_type == "Missing Product":
-                            # If product is missing in Cat1 at this rank
-                            if "missing in " + vlm_cat1_name in details or not is_product1_present_in_row:
-                                # How to highlight a "missing" box is tricky. 
-                                # `create_ranking_visualization` acts on existing detected boxes.
-                                # For now, we assume it means the slot has an issue, but can't draw a box if it wasn't detected.
-                                # If a placeholder box was created, it could be highlighted.
-                                # Let's assume for now if it's missing, there's no box TO highlight for that specific catalog.
-                                pass 
-                            # If product is missing in Cat2 at this rank
-                            if "missing in " + vlm_cat2_name in details or not is_product2_present_in_row:
-                                pass
+                            # Check if the error message says it's missing in Catalog 2
+                            if "missing in " + vlm_cat2_name in details:
+                                # If Cat 2 is missing, highlight the product that exists in Cat 1.
+                                issue_ranks_cat1.add(current_rank_on_page)
+                            # Check if the error message says it's missing in Catalog 1
+                            elif "missing in " + vlm_cat1_name in details:
+                                # If Cat 1 is missing, highlight the product that exists in Cat 2.
+                                issue_ranks_cat2.add(current_rank_on_page)
+                        
+                        # This part was already correct. It handles issues where both products exist but are different.
                         elif issue_type in ["Different Product", "Price Issue", "Multiple Issues"]:
-                            # These issues apply to the pair, so mark both if present
-                            if is_product1_present_in_row:
-                                issue_ranks_cat1.add(current_rank_on_page)
-                            if is_product2_present_in_row:
-                                issue_ranks_cat2.add(current_rank_on_page)
-                        # Add other issue types if necessary
-                        elif issue_type: # Any other non-empty issue_type that implies an error
-                            if is_product1_present_in_row:
-                                issue_ranks_cat1.add(current_rank_on_page)
-                            if is_product2_present_in_row:
-                                issue_ranks_cat2.add(current_rank_on_page)
+                            issue_ranks_cat1.add(current_rank_on_page)
+                            issue_ranks_cat2.add(current_rank_on_page)
 
 
                 # Regenerate visualization for Catalog 1, Page `page_num`
