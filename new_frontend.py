@@ -146,24 +146,29 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 # Extract highlighted pages (ranking visualizations)
                 def get_visualization_images_as_base64(catalog_main_path_str, num_pages, catalog_id_prefix):
                     images_b64 = []
+                    logging.info(f"[{catalog_id_prefix}] Attempting to load visualizations. Path: '{catalog_main_path_str}', Expected Pages: {num_pages}")
                     if not catalog_main_path_str or not os.path.exists(catalog_main_path_str):
-                        logging.warning(f"Catalog base path not found or invalid: {catalog_main_path_str}")
-                        return [None] * num_pages
+                        logging.warning(f"[{catalog_id_prefix}] Catalog base path not found or invalid: {catalog_main_path_str}")
+                        return [None] * num_pages # Ensure it returns a list of correct length for all pages
 
                     catalog_main_path = Path(catalog_main_path_str)
                     for page_num in range(1, num_pages + 1):
                         viz_filename = f"{catalog_id_prefix}_p{page_num}_ranking_visualization.jpg"
                         viz_filepath = catalog_main_path / f"page_{page_num}" / viz_filename
+                        logging.info(f"[{catalog_id_prefix}] Checking for file for Page {page_num}: {viz_filepath}")
                         if viz_filepath.exists():
                             try:
                                 with open(viz_filepath, "rb") as img_f:
-                                    images_b64.append(base64.b64encode(img_f.read()).decode('utf-8'))
+                                    encoded_img = base64.b64encode(img_f.read()).decode('utf-8')
+                                    images_b64.append(encoded_img)
+                                    logging.info(f"[{catalog_id_prefix}] Successfully loaded and encoded Page {page_num} from: {viz_filepath}")
                             except Exception as img_err:
-                                logging.error(f"Error reading visualization {viz_filepath}: {img_err}")
-                                images_b64.append(None)
+                                logging.error(f"[{catalog_id_prefix}] Error reading or encoding visualization {viz_filepath} for Page {page_num}: {img_err}")
+                                images_b64.append(None) # Important to append None on error
                         else:
-                            logging.warning(f"Visualization file not found: {viz_filepath}")
-                            images_b64.append(None)
+                            logging.warning(f"[{catalog_id_prefix}] Visualization file NOT FOUND for Page {page_num}: {viz_filepath}")
+                            images_b64.append(None) # Important to append None if not found
+                    logging.info(f"[{catalog_id_prefix}] Finished loading. Total images/placeholders returned: {len(images_b64)}")
                     return images_b64
 
                 frontend_results_to_display["highlighted_pages_file1"] = get_visualization_images_as_base64(
@@ -513,22 +518,33 @@ if st.button("Compare", key="compare_button_main", type="primary"):
                 )
                 st.session_state.comparison_results = results
                 
+                # Ensure these keys exist in results even if empty, to avoid KeyErrors later
                 st.session_state.highlighted_pages_file1 = results.get("highlighted_pages_file1", [])
                 st.session_state.highlighted_pages_file2 = results.get("highlighted_pages_file2", [])
-                
-                # The 'csv_export_content' is no longer generated/used for direct CSV export in frontend
-                st.session_state.csv_export_content = b"No CSV export available as per new requirements." 
+                st.session_state.csv_export_content = results.get("report_csv_data", b"No CSV data available.\n")
+                logging.info("Backend call finished. Results stored in session state.")
 
+                logging.info(f"Data for PDF1 in session state: {len(st.session_state.highlighted_pages_file1)} items. First item type: {type(st.session_state.highlighted_pages_file1[0]) if st.session_state.highlighted_pages_file1 else 'N/A'}")
+                logging.info(f"Data for PDF2 in session state: {len(st.session_state.highlighted_pages_file2)} items. First item type: {type(st.session_state.highlighted_pages_file2[0]) if st.session_state.highlighted_pages_file2 else 'N/A'}")
+                if st.session_state.highlighted_pages_file2 and st.session_state.highlighted_pages_file2[0] is None:
+                        logging.warning("First visualization for PDF2 in session state is None.")
+
+            # --- NEW Intermediate Status ---
+            status_text.text("⏳ Preparing visualizations for display...")
+            progress_bar.progress(95) # Indicate that most work is done
+            time.sleep(0.1) # Allow UI to update the status text
+            # --- END NEW Intermediate Status ---
 
             progress_bar.progress(100)
             if results and results.get("error"):
                 status_text.error(f"Comparison Error: {results.get('error')}")
                 st.error(f"Details: {results.get('message', 'No additional details.')}")
-            elif not BACKEND_AVAILABLE:
+            elif not BACKEND_AVAILABLE: # Assuming BACKEND_AVAILABLE is correctly set
                 status_text.error("Backend processor module is not available. Please check the application setup.")
             else:
                 status_text.success("🎉 Comparison Complete! Results are ready below.")
-            time.sleep(1)
+            # Consider removing or shortening time.sleep(1) if not desired
+            # time.sleep(1) 
 
         except Exception as e:
             st.error(f"An unexpected error occurred in the frontend: {str(e)}")

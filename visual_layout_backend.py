@@ -282,7 +282,7 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
         cropped = pil_img.crop((left, upper, right, lower))
         save_path = os.path.join(output_folder, f"{page_prefix}_rank_{idx+1}.jpg")
-        cropped.save(save_path, "JPEG")
+        cropped.save(save_path, "JPEG", quality=95) # Explicit high quality for VLM
         saved_cropped_files.append(save_path)
 
     os.remove(temp_img_path)
@@ -293,7 +293,8 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_product_ranks: Optional[set] = None):
     """
     Create a visualization showing the ranking order on the original image.
-    Highlights issues in red if issue_product_ranks is provided.
+    Only highlights issues in red if issue_product_ranks is provided and is not empty.
+    Correct products will not have any boxes drawn on them.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
@@ -306,54 +307,61 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             font = ImageFont.truetype("DejaVuSans.ttf", 30) # Common on Linux
         except IOError:
             font = ImageFont.load_default()
-            print("Warning: Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
+            logger.warning("Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
 
-    default_box_color = "blue"  # Color for non-issue boxes
-    issue_box_color = "red"    # Color for issue boxes
+    # default_box_color = "blue" # REMOVED - No default boxes for correct items
+    issue_box_color = "red"
     font_color = "black"
-    font_background_color = "yellow"
+    font_background_color = "yellow" # For the rank number background
 
     if not boxes:
-        print(f"No boxes to visualize for {output_path}. Saving original image.")
-        img_copy.save(output_path, "JPEG", quality=95)
+        logger.info(f"No boxes to visualize for {output_path}. Saving original image.")
+        # EXISTING (or implied previous quality):
+        # img_copy.save(output_path, "JPEG", quality=95) 
+        # NEW (optimized for display):
+        img_copy.save(output_path, "JPEG", quality=85) 
         return
 
-    for idx, box in enumerate(boxes):
+    if issue_product_ranks is None: # Ensure issue_product_ranks is a set for efficient lookup
+        issue_product_ranks = set()
+
+    for idx, box_data in enumerate(boxes): # Renamed 'box' to 'box_data' for clarity
         current_rank = idx + 1  # Rank is 1-based from the list order
 
-        box_outline_color = default_box_color
-        if issue_product_ranks and current_rank in issue_product_ranks:
-            box_outline_color = issue_box_color
+        # --- NEW LOGIC: Only draw if it's an issue ---
+        if current_rank in issue_product_ranks:
+            box_outline_color_to_use = issue_box_color # It's an issue, use red
 
-        left = int(box.get("left", 0))
-        top = int(box.get("top", 0))
-        right = int(box.get("right", pil_img.width))
-        bottom = int(box.get("bottom", pil_img.height))
+            left = int(box_data.get("left", 0))
+            top = int(box_data.get("top", 0))
+            right = int(box_data.get("right", pil_img.width))
+            bottom = int(box_data.get("bottom", pil_img.height))
 
-        draw.rectangle([left, top, right, bottom], outline=box_outline_color, width=4) # Slightly thicker for visibility
+            draw.rectangle([left, top, right, bottom], outline=box_outline_color_to_use, width=4)
 
-        rank_text = str(current_rank)
-        # Use textbbox for modern PIL to get accurate text size
-        try:
-            text_bbox = draw.textbbox((0, 0), rank_text, font=font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_height = text_bbox[3] - text_bbox[1]
-        except AttributeError: # Fallback for older Pillow versions that might not have textbbox
-            text_width, text_height = draw.textsize(rank_text, font=font)
+            rank_text = str(current_rank)
+            # Use textbbox for modern PIL to get accurate text size
+            try:
+                text_bbox = draw.textbbox((0, 0), rank_text, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+            except AttributeError: # Fallback for older Pillow versions
+                text_width, text_height = draw.textsize(rank_text, font=font)
+            
+            text_x = left + 5  # Position rank number inside the box
+            text_y = top + 5
 
+            # Draw background for the rank number for better visibility
+            draw.rectangle(
+                [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
+                fill=font_background_color,
+                outline="black", 
+                width=1
+            )
+            draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
 
-        text_x = left + 5
-        text_y = top + 5
-
-        draw.rectangle(
-            [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
-            fill=font_background_color,
-            outline="black",
-            width=1
-        )
-        draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
-
-    img_copy.save(output_path, "JPEG", quality=95)
+    img_copy.save(output_path, "JPEG", quality=85)
+    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks and len(issue_product_ranks) > 0)})")
     # print(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks)})")
 
 # In SCRIPT 1
@@ -393,9 +401,11 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
     print(f"\nPROCESSING PDF 1 (Box Detection): {Path(pdf_path1).name}")
     print("-" * 50)
     try:
-        pages1_pil_list = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path_to_use)
+        # For PDF 1
+        logger.info(f"Converting PDF 1 ({Path(pdf_path1).name}) to images with DPI 200...")
+        pages1_pil_list = convert_from_path(pdf_path1, dpi=200, poppler_path=poppler_path_to_use) # Changed DPI
         results["catalog1_pages"] = len(pages1_pil_list)
-        print(f"Converted PDF 1 to {len(pages1_pil_list)} pages")
+        logger.info(f"Converted PDF 1 to {len(pages1_pil_list)} pages")
 
         for page_idx, pil_page_image in enumerate(pages1_pil_list):
             page_num = page_idx + 1
@@ -423,16 +433,18 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
             # print(f"Page {page_num}: {len(saved_cropped_on_page)} product images cropped and data stored.")
 
     except Exception as e:
-        print(f"Error processing PDF 1: {e}")
+        logger.error(f"Error processing PDF 1: {e}", exc_info=True)
         results["catalog1_error"] = str(e)
 
     # Process PDF 2 (similar logic)
     print(f"\nPROCESSING PDF 2 (Box Detection): {Path(pdf_path2).name}")
     print("-" * 50)
     try:
-        pages2_pil_list = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path_to_use)
+    # For PDF 2
+        logger.info(f"Converting PDF 2 ({Path(pdf_path2).name}) to images with DPI 200...")
+        pages2_pil_list = convert_from_path(pdf_path2, dpi=200, poppler_path=poppler_path_to_use) # Changed DPI
         results["catalog2_pages"] = len(pages2_pil_list)
-        print(f"Converted PDF 2 to {len(pages2_pil_list)} pages")
+        logger.info(f"Converted PDF 2 to {len(pages2_pil_list)} pages")
 
         for page_idx, pil_page_image in enumerate(pages2_pil_list):
             page_num = page_idx + 1
@@ -458,7 +470,7 @@ def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_
             }
             # print(f"Page {page_num}: {len(saved_cropped_on_page)} product images cropped and data stored.")
     except Exception as e:
-        print(f"Error processing PDF 2: {e}")
+        logger.error(f"Error processing PDF 2: {e}", exc_info=True)
         results["catalog2_error"] = str(e)
 
     
