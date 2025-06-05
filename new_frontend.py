@@ -365,9 +365,9 @@ document.addEventListener('DOMContentLoaded', function() {
         flex-wrap: wrap;
     }
     .image-display-frame {
-        flex: 1; 
-        min-width: 45%; /* Ensure responsiveness */
-        max-width: 48%; /* Prevent taking full width on very large screens if only one column */
+        .image-display-frame {
+        width: 100%; /* CHANGE: Fill the container (the column) */
+        box-sizing: border-box; /* ADDED: Good practice for layout */
         border: 1px solid #eee;
         padding: 10px;
         border-radius: 8px;
@@ -377,7 +377,7 @@ document.addEventListener('DOMContentLoaded', function() {
         align-items: center;
         position: relative; /* For zoom icon positioning */
         overflow: hidden; /* Important for zoom effect */
-        border-radius: 4px;
+         f
     }
     .image-wrapper {
         width: 100%;
