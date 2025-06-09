@@ -1,0 +1,2 @@
+[server]
+folderWatchBlacklist = ["catalog_comparison_results"]
