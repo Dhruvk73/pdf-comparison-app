@@ -1388,20 +1388,54 @@ class PracticalCatalogComparator:
             if "error_message" not in product_data:
                 catalog2_products[img_info['rank']] = product_data
 
-        # Generate comparison table - position by position
+        # ===============================================================
+# ADD THIS NEW LOGIC IN ITS PLACE
+# ===============================================================
+
         comparison_rows = []
-        max_rank = max(
-            max(catalog1_products.keys(), default=0),
-            max(catalog2_products.keys(), default=0)
-        )
+      
+      # Convert the dictionary of catalog 2 products into a list we can modify
+        unmatched_c2_products = list(catalog2_products.values())
+      
+      # --- Part 1: Find matches for every product in Catalog 1 ---
+        for p1_rank, p1_data in catalog1_products.items():
+          best_match_p2 = None
+          highest_score = -1
 
-        for rank in range(1, max_rank + 1):
-            product1 = catalog1_products.get(rank)
-            product2 = catalog2_products.get(rank)
+          # Find the best possible match in the list of unmatched catalog 2 products
+          for p2_data in unmatched_c2_products:
+              # Use the brand similarity function you already wrote
+              is_match, score = self.are_brands_same_product(
+                  p1_data.get('product_brand'), 
+                  p2_data.get('product_brand')
+              )
+              
+              # If it's a potential match and has a higher score than previous findings
+              if is_match and score > highest_score:
+                  highest_score = score
+                  best_match_p2 = p2_data
+          
+          if best_match_p2:
+              # A confident match was found! Create the comparison row.
+              row = self.create_practical_comparison_row(p1_data, best_match_p2, p1_rank, catalog1_name, catalog2_name)
+              if row:
+                  comparison_rows.append(row)
+              
+              # IMPORTANT: Remove the matched product so it can't be matched again
+              unmatched_c2_products.remove(best_match_p2)
+          else:
+              # No match was found for this catalog 1 product, so it's missing from catalog 2
+              row = self.create_practical_comparison_row(p1_data, None, p1_rank, catalog1_name, catalog2_name)
+              if row:
+                  comparison_rows.append(row)
 
-            row = self.create_practical_comparison_row(product1, product2, rank, catalog1_name, catalog2_name)
-            if row:
-                comparison_rows.append(row)
+      # --- Part 2: Handle products that are in Catalog 2 but were never matched ---
+      # These are products missing from Catalog 1
+        for p2_data_unmatched in unmatched_c2_products:
+          p2_rank = p2_data_unmatched.get('rank', 'N/A')
+          row = self.create_practical_comparison_row(None, p2_data_unmatched, p2_rank, catalog1_name, catalog2_name)
+          if row:
+              comparison_rows.append(row)
 
         result = {
             "catalog1_name": catalog1_name,
