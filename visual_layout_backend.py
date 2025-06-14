@@ -1984,45 +1984,50 @@ def catalog_comparison_pipeline(
                 # Regenerate visualization for Catalog 1, Page `page_num`
                 if pdf_results and page_num in pdf_results.get("page_level_data_catalog1", {}):
                     page_info_c1 = pdf_results["page_level_data_catalog1"][page_num]
-                    pil_img_c1 = page_info_c1.get('image_pil')
-                    ranked_boxes_c1 = page_info_c1.get('ranked_boxes')
-                    # Path where cropped images (and thus visualizations) for this page are stored
-                    page_folder_c1 = Path(page_info_c1.get('page_folder_path')) 
                     
-                    if pil_img_c1 and ranked_boxes_c1 and page_folder_c1.exists():
-                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
-                        viz_output_path_c1 = page_folder_c1 / viz_filename_c1
+                    # Create the dictionary that the visualization function now expects
+                    issue_details_c1 = {
+                        idx + 1: row.get("granular_differences", [])
+                        for idx, row in enumerate(comparison_rows)
+                        if row.get("comparison_result") == "INCORRECT" and row.get("granular_differences")
+                    }
+
+                    if page_info_c1.get('image_pil') and page_info_c1.get('ranked_boxes'):
+                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg"
+                        viz_output_path_c1 = Path(page_info_c1['page_folder_path']) / viz_filename_c1
+                        
+                        # Use the correct parameter name: 'issue_details_per_rank'
                         create_ranking_visualization(
-                            pil_img=pil_img_c1,
-                            boxes=ranked_boxes_c1,
+                            pil_img=page_info_c1['image_pil'],
+                            boxes=page_info_c1['ranked_boxes'],
                             output_path=str(viz_output_path_c1),
-                            issue_product_ranks=issue_ranks_cat1 # Pass the identified issue ranks
+                            issue_details_per_rank=issue_details_c1
                         )
-                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
-                    else:
-                        logger.warning(f"Could not update viz for Cat1 Page {page_num}, missing PIL/boxes or folder path.")
+                        logger.info(f"Updated visualization for Catalog 1 Page {page_num} with issues: {list(issue_details_c1.keys())}")
 
                 # Regenerate visualization for Catalog 2, Page `page_num`
                 if pdf_results and page_num in pdf_results.get("page_level_data_catalog2", {}):
                     page_info_c2 = pdf_results["page_level_data_catalog2"][page_num]
-                    pil_img_c2 = page_info_c2.get('image_pil')
-                    ranked_boxes_c2 = page_info_c2.get('ranked_boxes')
-                    page_folder_c2 = Path(page_info_c2.get('page_folder_path'))
 
-                    if pil_img_c2 and ranked_boxes_c2 and page_folder_c2.exists():
-                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
-                        viz_output_path_c2 = page_folder_c2 / viz_filename_c2
+                    # Create the dictionary for catalog 2
+                    issue_details_c2 = {
+                        idx + 1: row.get("granular_differences", [])
+                        for idx, row in enumerate(comparison_rows)
+                        if row.get("comparison_result") == "INCORRECT" and row.get("granular_differences")
+                    }
+
+                    if page_info_c2.get('image_pil') and page_info_c2.get('ranked_boxes'):
+                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg"
+                        viz_output_path_c2 = Path(page_info_c2['page_folder_path']) / viz_filename_c2
+                        
+                        # Use the correct parameter name: 'issue_details_per_rank'
                         create_ranking_visualization(
-                            pil_img=pil_img_c2,
-                            boxes=ranked_boxes_c2,
+                            pil_img=page_info_c2['image_pil'],
+                            boxes=page_info_c2['ranked_boxes'],
                             output_path=str(viz_output_path_c2),
-                            issue_product_ranks=issue_ranks_cat2 # Pass the identified issue ranks
+                            issue_details_per_rank=issue_details_c2
                         )
-                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
-                    else:
-                        logger.warning(f"Could not update viz for Cat2 Page {page_num}, missing PIL/boxes or folder path.")
-        else:
-            logger.info("No VLM comparison results found or step3_vlm_comparison is empty. Visualizations will not be updated with VLM issues.")
+                        logger.info(f"Updated visualization for Catalog 2 Page {page_num} with issues: {list(issue_details_c2.keys())}")
 
         # ==============================
         # STEP 4: CONSOLIDATE RESULTS
