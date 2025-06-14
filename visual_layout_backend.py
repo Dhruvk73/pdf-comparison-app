@@ -300,69 +300,59 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     draw = ImageDraw.Draw(img_copy)
 
     try:
-        # Try to load a common font, fallback to default
-        font = ImageFont.truetype("arial.ttf", 30)
+        font = ImageFont.truetype("arial.ttf", 24)
+        label_font = ImageFont.truetype("arialbd.ttf", 20) # Bold for labels
     except IOError:
-        try:
-            font = ImageFont.truetype("DejaVuSans.ttf", 30) # Common on Linux
-        except IOError:
-            font = ImageFont.load_default()
-            logger.warning("Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
+        font = ImageFont.load_default()
+        label_font = ImageFont.load_default()
 
-    # default_box_color = "blue" # REMOVED - No default boxes for correct items
-    issue_box_color = "red"
-    font_color = "black"
-    font_background_color = "yellow" # For the rank number background
+    if issue_details_per_rank is None:
+        issue_details_per_rank = {}
 
-    if not boxes:
-        logger.info(f"No boxes to visualize for {output_path}. Saving original image.")
-        # EXISTING (or implied previous quality):
-        # img_copy.save(output_path, "JPEG", quality=95) 
-        # NEW (optimized for display):
-        img_copy.save(output_path, "JPEG", quality=85) 
-        return
+    # Define colors for each issue type
+    color_map = {
+        "Price": (255, 77, 77, 200),   # Red
+        "Text": (255, 179, 64, 200),  # Orange
+        "Image": (77, 135, 255, 200),  # Blue
+    }
+    label_color = (255, 255, 255) # White text
 
-    if issue_product_ranks is None: # Ensure issue_product_ranks is a set for efficient lookup
-        issue_product_ranks = set()
-
-    for idx, box_data in enumerate(boxes): # Renamed 'box' to 'box_data' for clarity
-        current_rank = idx + 1  # Rank is 1-based from the list order
-
-        # --- NEW LOGIC: Only draw if it's an issue ---
-        if current_rank in issue_product_ranks:
-            box_outline_color_to_use = issue_box_color # It's an issue, use red
-
-            left = int(box_data.get("left", 0))
-            top = int(box_data.get("top", 0))
-            right = int(box_data.get("right", pil_img.width))
-            bottom = int(box_data.get("bottom", pil_img.height))
-
-            draw.rectangle([left, top, right, bottom], outline=box_outline_color_to_use, width=4)
-
-            rank_text = str(current_rank)
-            # Use textbbox for modern PIL to get accurate text size
-            try:
-                text_bbox = draw.textbbox((0, 0), rank_text, font=font)
-                text_width = text_bbox[2] - text_bbox[0]
-                text_height = text_bbox[3] - text_bbox[1]
-            except AttributeError: # Fallback for older Pillow versions
-                text_width, text_height = draw.textsize(rank_text, font=font)
+    for idx, box_data in enumerate(boxes):
+        current_rank = idx + 1
+        
+        if current_rank in issue_details_per_rank:
+            product_differences = issue_details_per_rank[current_rank]
             
-            text_x = left + 5  # Position rank number inside the box
-            text_y = top + 5
+            # Draw a faint box around the whole product to show it has an issue
+            product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
+            draw.rectangle(product_box_coords, outline="gray", width=1, fill=(255, 255, 0, 40)) # Faint yellow fill
 
-            # Draw background for the rank number for better visibility
-            draw.rectangle(
-                [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
-                fill=font_background_color,
-                outline="black", 
-                width=1
-            )
-            draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
+            for diff in product_differences:
+                diff_type = diff.get("type")
+                diff_box = diff.get("box1") # We are drawing on the first image's canvas
+                
+                if not diff_type or not diff_box:
+                    continue
 
-    img_copy.save(output_path, "JPEG", quality=85)
-    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks and len(issue_product_ranks) > 0)})")
-    # print(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks)})")
+                box_color = color_map.get(diff_type, (128, 128, 128, 200)) # Default gray
+                
+                # The VLM returns coordinates relative to the cropped image. We must translate them
+                # to be relative to the full page image.
+                offset_x, offset_y = product_box_coords[0], product_box_coords[1]
+                x1, y1, x2, y2 = diff_box
+                abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
+                
+                # Draw the specific error box
+                draw.rectangle(abs_box, outline=box_color, width=4)
+
+                # Draw the label (e.g., "Price")
+                label_bg_box = [abs_box[0], abs_box[1] - 25, abs_box[0] + 70, abs_box[1]]
+                draw.rectangle(label_bg_box, fill=box_color)
+                draw.text((label_bg_box[0] + 5, label_bg_box[1] + 2), diff_type, fill=label_color, font=label_font)
+
+    # Save the final image
+    img_copy.save(output_path, "JPEG", quality=90)
+    logger.info(f"Granular visualization saved to: {output_path}")
 
 # In SCRIPT 1
 
@@ -1487,74 +1477,40 @@ class PracticalCatalogComparator:
                 "brand_match": "N/A"
             }
 
-        # Both products present - practical comparison
-        issues = []
+        # Both products are present, find granular differences
+        item_id_for_log = f"{catalog1_name}-Rank{rank}"
+        
+        # Call the new VLM function to get specific differences
+        differences = self.find_differences_with_vlm(
+            product1['image_path'],
+            product2['image_path'],
+            item_id_for_log
+        )
 
-        # Extract key data with safe None handling
-        p1_offer = product1.get('offer_price')
-        p2_offer = product2.get('offer_price')
-
-        # Safe brand extraction
-        p1_brand_raw = product1.get('product_brand')
-        p2_brand_raw = product2.get('product_brand')
-
-        p1_brand = p1_brand_raw.strip() if p1_brand_raw else ''
-        p2_brand = p2_brand_raw.strip() if p2_brand_raw else ''
-
-        # 1. CHECK BRANDS - Are these the same product?
-        brand_match, brand_score = self.are_brands_same_product(p1_brand, p2_brand)
-
-        if not brand_match and p1_brand and p2_brand:
-            issues.append(f"Different Products: '{p1_brand}' vs '{p2_brand}' (similarity: {brand_score:.1f}%)")
-
-        # 2. CHECK PRICES - Significant price differences only
-        price_issue = False
-        price_details = ""
-
-        if p1_offer is not None and p2_offer is not None:
-            price_diff = abs(float(p1_offer) - float(p2_offer))
-            if price_diff > self.price_tolerance:
-                price_issue = True
-                issues.append(f"Price Difference: ${p1_offer} vs ${p2_offer} (diff: ${price_diff:.2f})")
-                price_details = f"${price_diff:.2f} difference"
-        elif p1_offer is not None and p2_offer is None:
-            price_issue = True
-            issues.append(f"Missing Price: C1=${p1_offer}, C2=No Price")
-            price_details = "Missing price in catalog 2"
-        elif p1_offer is None and p2_offer is not None:
-            price_issue = True
-            issues.append(f"Missing Price: C1=No Price, C2=${p2_offer}")
-            price_details = "Missing price in catalog 1"
-
-        # Determine overall result
-        if issues:
-            if not brand_match and p1_brand and p2_brand:
-                result = "INCORRECT - Different Product"
-                issue_type = "Different Product"
-            elif price_issue:
-                result = "INCORRECT - Price Issue"
-                issue_type = "Price Difference"
-            else:
-                result = "INCORRECT - Multiple Issues"
-                issue_type = "Multiple Issues"
-        else:
-            result = "CORRECT"
-            issue_type = "Match Confirmed"
-            issues.append("Same product, same price - minor text differences ignored")
-
-        # Format displays
         p1_display = self.format_product_display(product1)
         p2_display = self.format_product_display(product2)
-
-        return {
-            f"{catalog1_name}_details": p1_display,
-            f"{catalog2_name}_details": p2_display,
-            "comparison_result": result,
-            "issue_type": issue_type,
-            "details": "; ".join(issues) if issues else "Products match",
-            "price_match": "YES" if not price_issue else "NO",
-            "brand_match": "YES" if brand_match else f"NO ({brand_score:.1f}%)",
-            "brand_similarity": f"{brand_score:.1f}%"
+        
+        if not differences:
+            # No differences found, it's a correct match
+            return {
+                f"{catalog1_name}_details": p1_display,
+                f"{catalog2_name}_details": p2_display,
+                "comparison_result": "CORRECT",
+                "issue_type": "Match Confirmed",
+                "details": "Products appear to be identical.",
+                "granular_differences": [] # No specific issues
+            }
+        else:
+            # Differences were found, categorize and list them
+            issue_types = sorted(list(set([d['type'] for d in differences])))
+            
+            return {
+                f"{catalog1_name}_details": p1_display,
+                f"{catalog2_name}_details": p2_display,
+                "comparison_result": "INCORRECT",
+                "issue_type": ", ".join(issue_types),
+                "details": "; ".join([d['description'] for d in differences]),
+                "granular_differences": differences # Pass the detailed box info
         }
 
     def format_product_display(self, product: Dict) -> str:
@@ -1661,6 +1617,65 @@ class PracticalCatalogComparator:
         print(f"Different products: {different_products}")
         print(f"Missing products: {missing_products}")
         print(f"Match rate: {(correct_matches/max(total_rows,1)*100):.1f}%")
+
+    # In visual_layout_backend.py, add this new function inside the PracticalCatalogComparator class
+
+def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> Dict:
+    """
+    Uses a VLM to find specific differences (Price, Text, Image) between two product images
+    and returns their bounding boxes.
+    """
+    try:
+        with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
+            b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
+            b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
+
+        system_prompt = """
+        You are a hyper-precise visual QA inspector for retail catalogs. Your task is to compare two images of the same product and identify EXACTLY where they differ.
+
+        You must identify three types of differences:
+        1.  **Price Difference**: If the main offer prices are different.
+        2.  **Text Difference**: If the brand names, descriptions, or sizes have significant textual differences.
+        3.  **Image Difference**: If the core product photographs themselves are visually different (e.g., different angle, packaging).
+
+        For EACH difference you find, you MUST return a JSON object with:
+        - "type": One of "Price", "Text", or "Image".
+        - "box1": The bounding box [x1, y1, x2, y2] of the difference in the FIRST image.
+        - "box2": The bounding box [x1, y1, x2, y2] of the difference in the SECOND image.
+        - "description": A brief explanation of the difference (e.g., "$12.97 vs $14.97").
+
+        If there are no differences, return an empty list. Respond ONLY with a valid JSON object containing a list of these difference objects.
+        Example for a price difference: [{"type": "Price", "box1": [150, 30, 200, 60], "box2": [152, 31, 201, 62], "description": "$5.99 vs $6.99"}]
+        """
+        
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": system_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
+                ]
+            }
+        ]
+
+        logger.info(f"ITEM_ID: {item_id_for_log} - Finding granular differences with VLM...")
+        response = self.openai_client.chat.completions.create(
+            model=self.vlm_model,
+            messages=messages,
+            response_format={"type": "json_object"},
+            max_tokens=2048
+        )
+
+        response_content = response.choices[0].message.content
+        # The VLM should return a JSON object like: {"differences": [...]}
+        differences_data = json.loads(response_content)
+        return differences_data.get("differences", [])
+
+    except Exception as e:
+        logger.error(f"ITEM_ID: {item_id_for_log} - VLM difference detection error: {e}")
+        return [] # Return no differences on error
+    
 
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                        catalog1_name: str = None, catalog2_name: str = None,

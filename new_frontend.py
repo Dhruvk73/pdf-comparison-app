@@ -326,12 +326,22 @@ if 'comparison_results' in st.session_state:
         st.error(f"An error occurred during the comparison process: {results.get('error')}")
     else:
         # --- Summary Metrics ---
-        st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Comparison Summary</h2>", unsafe_allow_html=True)
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric(label=f"Products in {st.session_state.get('file1_name', 'File 1')}", value=results.get("product_items_file1_count", "N/A"))
-        col_m2.metric(label=f"Products in {st.session_state.get('file2_name', 'File 2')}", value=results.get("product_items_file2_count", "N/A"))
-        num_issues = len(results.get("product_comparison_details", []))
-        col_m3.metric(label="Discrepancies Found", value=num_issues)
+        st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Error Summary</h2>", unsafe_allow_html=True)
+        
+        # Calculate totals from the results
+        all_diffs = [diff for row in results.get("product_comparison_details", []) for diff in row.get("granular_differences", [])]
+        price_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Price')
+        text_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Text')
+        image_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Image')
+        total_mistakes = price_mistakes + text_mistakes + image_mistakes
+
+        sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
+        sum_col1.metric("Total Discrepancies", total_mistakes)
+        sum_col2.metric("Price Issues", price_mistakes)
+        sum_col3.metric("Text/Brand Issues", text_mistakes)
+        sum_col4.metric("Image Mismatches", image_mistakes)
+        
+        # --- End of new section ---
 
         # --- Visual Comparison Section (Full Pages) ---
         highlighted_pages_file1 = st.session_state.get('highlighted_pages_file1', [])
