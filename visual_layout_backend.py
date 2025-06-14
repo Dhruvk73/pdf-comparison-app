@@ -1559,26 +1559,37 @@ class PracticalCatalogComparator:
         system_prompt = """
     You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS.
 
-    Your job: Determine if these products are SEMANTICALLY THE SAME (same brand, same product type) and then find actual errors.
+    Your task: Compare these products and identify obvious quality control issues.
 
-    STEP 1: Are these the same product type?
-    - Same brand (Tide vs Tide, Bounty vs Bounty)?
-    - Same product category (detergent vs detergent, paper towels vs paper towels)?
-    - Same general size range (not exactly same, but similar)?
+    Look for these types of errors:
 
-    STEP 2: If they are the SAME PRODUCT TYPE, look for these production errors:
-    1. **Price errors**: Significant price differences for same product (>$2 difference)
-    2. **Text errors**: Obvious typos, missing text, wrong descriptions
-    3. **Image errors**: Wrong product photo, missing promotional badges, visual corruption
+    1. **Price Errors**: 
+    - Same/similar products with significantly different prices (>$3 difference)
+    - Obvious price typos (like $199.99 vs $19.99)
+    - Missing prices or price formatting errors
 
-    STEP 3: If they are DIFFERENT PRODUCT TYPES:
-    - This is normal catalog variation, not an error
-    - Return {"differences": []}
+    2. **Text Errors**:
+    - Clear spelling mistakes or typos in product names
+    - Missing or garbled text
+    - Wrong product descriptions that don't match the image
 
-    Examples of SAME products (don't flag): Tide 50oz vs Tide 64oz, Bounty 6-pack vs Bounty 8-pack
-    Examples of DIFFERENT products (don't flag): Tide vs Gain, Bounty vs Scott, Detergent vs Paper towels
+    3. **Image Errors**:
+    - Obviously wrong product photos (detergent showing a car)
+    - Corrupted, missing, or broken images
+    - Misaligned or overlapping elements
 
-    Only report actual production errors in similar products. Return JSON format: {"differences": []} or {"differences": [list]}.
+    4. **Layout Errors**:
+    - Text cut off or overlapping images
+    - Missing important information like sizes or brands
+
+    IGNORE these normal variations:
+    - Different brands in the same position (Tide vs Gain is normal)
+    - Different product categories (detergent vs paper towels is normal)
+    - Minor price differences (<$3)
+    - Different promotional banners or seasonal decorations
+    - Minor lighting or color variations
+
+    Only report actual production errors that would require fixing. Return JSON format: {"differences": []} or {"differences": [list]}.
         """
         
         try:
@@ -1601,8 +1612,8 @@ class PracticalCatalogComparator:
                 model=self.vlm_model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                max_tokens=1500,  # Reduced since we want fewer, more meaningful responses
-                temperature=0.05  # Very low temperature for consistent results
+                max_tokens=1000,
+                temperature=0.1  # Slightly higher for more nuanced responses
             )
 
             response_content = response.choices[0].message.content
