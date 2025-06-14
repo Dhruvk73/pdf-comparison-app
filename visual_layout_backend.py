@@ -1620,62 +1620,62 @@ class PracticalCatalogComparator:
 
     # In visual_layout_backend.py, add this new function inside the PracticalCatalogComparator class
 
-def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> Dict:
-    """
-    Uses a VLM to find specific differences (Price, Text, Image) between two product images
-    and returns their bounding boxes.
-    """
-    try:
-        with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
-            b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
-            b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
-
-        system_prompt = """
-        You are a hyper-precise visual QA inspector for retail catalogs. Your task is to compare two images of the same product and identify EXACTLY where they differ.
-
-        You must identify three types of differences:
-        1.  **Price Difference**: If the main offer prices are different.
-        2.  **Text Difference**: If the brand names, descriptions, or sizes have significant textual differences.
-        3.  **Image Difference**: If the core product photographs themselves are visually different (e.g., different angle, packaging).
-
-        For EACH difference you find, you MUST return a JSON object with:
-        - "type": One of "Price", "Text", or "Image".
-        - "box1": The bounding box [x1, y1, x2, y2] of the difference in the FIRST image.
-        - "box2": The bounding box [x1, y1, x2, y2] of the difference in the SECOND image.
-        - "description": A brief explanation of the difference (e.g., "$12.97 vs $14.97").
-
-        If there are no differences, return an empty list. Respond ONLY with a valid JSON object containing a list of these difference objects.
-        Example for a price difference: {"differences": [{"type": "Price", "box1": [150, 30, 200, 60], "box2": [152, 31, 201, 62], "description": "$5.99 vs $6.99"}]}
+    def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> Dict:
         """
+        Uses a VLM to find specific differences (Price, Text, Image) between two product images
+        and returns their bounding boxes.
+        """
+        try:
+            with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
+                b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
+                b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
 
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": system_prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
-                ]
-            }
-        ]
+            system_prompt = """
+            You are a hyper-precise visual QA inspector for retail catalogs. Your task is to compare two images of the same product and identify EXACTLY where they differ.
 
-        logger.info(f"ITEM_ID: {item_id_for_log} - Finding granular differences with VLM...")
-        response = self.openai_client.chat.completions.create(
-            model=self.vlm_model,
-            messages=messages,
-            response_format={"type": "json_object"},
-            max_tokens=2048
-        )
+            You must identify three types of differences:
+            1.  **Price Difference**: If the main offer prices are different.
+            2.  **Text Difference**: If the brand names, descriptions, or sizes have significant textual differences.
+            3.  **Image Difference**: If the core product photographs themselves are visually different (e.g., different angle, packaging).
 
-        response_content = response.choices[0].message.content
-        # The VLM should return a JSON object like: {"differences": [...]}
-        differences_data = json.loads(response_content)
-        return differences_data.get("differences", [])
+            For EACH difference you find, you MUST return a JSON object with:
+            - "type": One of "Price", "Text", or "Image".
+            - "box1": The bounding box [x1, y1, x2, y2] of the difference in the FIRST image.
+            - "box2": The bounding box [x1, y1, x2, y2] of the difference in the SECOND image.
+            - "description": A brief explanation of the difference (e.g., "$12.97 vs $14.97").
 
-    except Exception as e:
-        logger.error(f"ITEM_ID: {item_id_for_log} - VLM difference detection error: {e}")
-        return [] # Return no differences on error
-    
+            If there are no differences, return an empty list. Respond ONLY with a valid JSON object containing a list of these difference objects.
+            Example for a price difference: {"differences": [{"type": "Price", "box1": [150, 30, 200, 60], "box2": [152, 31, 201, 62], "description": "$5.99 vs $6.99"}]}
+            """
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": system_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
+                    ]
+                }
+            ]
+
+            logger.info(f"ITEM_ID: {item_id_for_log} - Finding granular differences with VLM...")
+            response = self.openai_client.chat.completions.create(
+                model=self.vlm_model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=2048
+            )
+
+            response_content = response.choices[0].message.content
+            # The VLM should return a JSON object like: {"differences": [...]}
+            differences_data = json.loads(response_content)
+            return differences_data.get("differences", [])
+
+        except Exception as e:
+            logger.error(f"ITEM_ID: {item_id_for_log} - VLM difference detection error: {e}")
+            return [] # Return no differences on error
+        
 
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                        catalog1_name: str = None, catalog2_name: str = None,
