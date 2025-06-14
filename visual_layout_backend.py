@@ -1557,24 +1557,28 @@ class PracticalCatalogComparator:
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
     
         system_prompt = """
-    You are comparing two versions of the same product position in Spanish retail catalogs for quality control.
+    You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS.
 
-    Identify differences in these categories:
+    Your job: Determine if these products are SEMANTICALLY THE SAME (same brand, same product type) and then find actual errors.
 
-    1. **Price**: Any difference in the main price numbers (like $12.87 vs $14.97)
-    2. **Text**: Different brand names, product descriptions, or size info  
-    3. **Image**: Different product photos, missing/added promotional badges or stickers
-    4. **Product**: If these appear to be completely different products (different brands/items)
+    STEP 1: Are these the same product type?
+    - Same brand (Tide vs Tide, Bounty vs Bounty)?
+    - Same product category (detergent vs detergent, paper towels vs paper towels)?
+    - Same general size range (not exactly same, but similar)?
 
-    For each difference, provide:
-    - "type": "Price", "Text", "Image", or "Product"
-    - "box1": [x1, y1, x2, y2] - coordinates of the difference area in FIRST image
-    - "box2": [x1, y1, x2, y2] - coordinates of the difference area in SECOND image  
-    - "description": Brief explanation (e.g., "$12.87 vs $14.97", "Ace vs All", "Missing red badge")
+    STEP 2: If they are the SAME PRODUCT TYPE, look for these production errors:
+    1. **Price errors**: Significant price differences for same product (>$2 difference)
+    2. **Text errors**: Obvious typos, missing text, wrong descriptions
+    3. **Image errors**: Wrong product photo, missing promotional badges, visual corruption
 
-    Return your response as a JSON object with this format: {"differences": [list of differences]} or {"differences": []} if identical.
+    STEP 3: If they are DIFFERENT PRODUCT TYPES:
+    - This is normal catalog variation, not an error
+    - Return {"differences": []}
 
-    Note: These should be the same product position in two catalog versions. Focus on actual content differences, ignore minor lighting/angle changes.
+    Examples of SAME products (don't flag): Tide 50oz vs Tide 64oz, Bounty 6-pack vs Bounty 8-pack
+    Examples of DIFFERENT products (don't flag): Tide vs Gain, Bounty vs Scott, Detergent vs Paper towels
+
+    Only report actual production errors in similar products. Return JSON format: {"differences": []} or {"differences": [list]}.
         """
         
         try:
@@ -1597,8 +1601,8 @@ class PracticalCatalogComparator:
                 model=self.vlm_model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                max_tokens=2048,
-                temperature=0.1
+                max_tokens=1500,  # Reduced since we want fewer, more meaningful responses
+                temperature=0.05  # Very low temperature for consistent results
             )
 
             response_content = response.choices[0].message.content
