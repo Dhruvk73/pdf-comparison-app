@@ -290,7 +290,7 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # In SCRIPT 1
 
-def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_product_ranks: Optional[set] = None):
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
     Create a visualization showing the ranking order on the original image.
     Only highlights issues in red if issue_product_ranks is provided and is not empty.
@@ -1645,9 +1645,9 @@ def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_
         - "description": A brief explanation of the difference (e.g., "$12.97 vs $14.97").
 
         If there are no differences, return an empty list. Respond ONLY with a valid JSON object containing a list of these difference objects.
-        Example for a price difference: [{"type": "Price", "box1": [150, 30, 200, 60], "box2": [152, 31, 201, 62], "description": "$5.99 vs $6.99"}]
+        Example for a price difference: {"differences": [{"type": "Price", "box1": [150, 30, 200, 60], "box2": [152, 31, 201, 62], "description": "$5.99 vs $6.99"}]}
         """
-        
+
         messages = [
             {
                 "role": "user",
