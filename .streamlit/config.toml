@@ -1,2 +1,3 @@
 [server]
 folderWatchBlacklist = ["catalog_comparison_results"]
+maxUploadSize = 1024
