@@ -325,7 +325,7 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             
             # Draw a faint box around the whole product to show it has an issue
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
-            draw.rectangle(product_box_coords, outline="gray", width=1, fill=(255, 255, 0, 40)) # Faint yellow fill
+            
 
             for diff in product_differences:
                 diff_type = diff.get("type")
