@@ -1556,61 +1556,60 @@ class PracticalCatalogComparator:
 
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
     
-            system_prompt = """
-        You are comparing two versions of the same product position in Spanish retail catalogs for quality control.
+        system_prompt = """
+    You are comparing two versions of the same product position in Spanish retail catalogs for quality control.
 
-        Identify differences in these categories:
+    Identify differences in these categories:
 
-        1. **Price**: Any difference in the main price numbers (like $12.87 vs $14.97)
-        2. **Text**: Different brand names, product descriptions, or size info  
-        3. **Image**: Different product photos, missing/added promotional badges or stickers
-        4. **Product**: If these appear to be completely different products (different brands/items)
+    1. **Price**: Any difference in the main price numbers (like $12.87 vs $14.97)
+    2. **Text**: Different brand names, product descriptions, or size info  
+    3. **Image**: Different product photos, missing/added promotional badges or stickers
+    4. **Product**: If these appear to be completely different products (different brands/items)
 
-        For each difference, provide:
-        - "type": "Price", "Text", "Image", or "Product"
-        - "box1": [x1, y1, x2, y2] - coordinates of the difference area in FIRST image
-        - "box2": [x1, y1, x2, y2] - coordinates of the difference area in SECOND image  
-        - "description": Brief explanation (e.g., "$12.87 vs $14.97", "Ace vs All", "Missing red badge")
+    For each difference, provide:
+    - "type": "Price", "Text", "Image", or "Product"
+    - "box1": [x1, y1, x2, y2] - coordinates of the difference area in FIRST image
+    - "box2": [x1, y1, x2, y2] - coordinates of the difference area in SECOND image  
+    - "description": Brief explanation (e.g., "$12.87 vs $14.97", "Ace vs All", "Missing red badge")
 
-        Return: {"differences": [list of differences]} or {"differences": []} if identical.
+    Return your response as a JSON object with this format: {"differences": [list of differences]} or {"differences": []} if identical.
 
-        Note: These should be the same product position in two catalog versions. Focus on actual content differences, ignore minor lighting/angle changes.
-            """
-            
-            try:
-                with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
-                    b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
-                    b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
-
-                messages = [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": system_prompt},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
-                        ]
-                    }
-                ]
-
-                response = self.openai_client.chat.completions.create(
-                    model=self.vlm_model,
-                    messages=messages,
-                    response_format={"type": "json_object"},
-                    max_tokens=2048,
-                    temperature=0.1  # Lower temperature for more consistent results
-                )
-
-                response_content = response.choices[0].message.content
-                logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
-                
-                differences_data = json.loads(response_content)
-                return differences_data.get("differences", [])
-
-            except Exception as e:
-                logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
-                return []
+    Note: These should be the same product position in two catalog versions. Focus on actual content differences, ignore minor lighting/angle changes.
+        """
         
+        try:
+            with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
+                b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
+                b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": system_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
+                    ]
+                }
+            ]
+
+            response = self.openai_client.chat.completions.create(
+                model=self.vlm_model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=2048,
+                temperature=0.1
+            )
+
+            response_content = response.choices[0].message.content
+            logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
+            
+            differences_data = json.loads(response_content)
+            return differences_data.get("differences", [])
+
+        except Exception as e:
+            logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
+            return []
 
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                        catalog1_name: str = None, catalog2_name: str = None,
