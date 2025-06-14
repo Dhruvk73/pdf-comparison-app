@@ -1620,7 +1620,17 @@ class PracticalCatalogComparator:
             logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
             
             differences_data = json.loads(response_content)
-            return differences_data.get("differences", [])
+            differences_list = differences_data.get("differences", [])
+            
+            # DEBUG: Check the structure
+            if differences_list:
+                logger.info(f"ITEM_ID: {item_id_for_log} - Found {len(differences_list)} differences")
+                for i, diff in enumerate(differences_list):
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Diff {i}: {diff}")
+                    if not isinstance(diff, dict) or 'type' not in diff:
+                        logger.error(f"ITEM_ID: {item_id_for_log} - Malformed difference: {diff}")
+            
+            return differences_list
 
         except Exception as e:
             logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
