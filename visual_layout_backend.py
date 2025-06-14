@@ -292,69 +292,78 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # Replace the ENTIRE create_ranking_visualization function with this one:
 
-def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, 
+                               issue_details_per_rank: Optional[Dict] = None):
     """
-    Creates a visualization with CLEAR, readable highlights for specific, significant issues.
+    Creates visualization with RED boxes for all errors and text labels below each box.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy, "RGBA")
 
     try:
-        # Increased font sizes for better readability
-        font = ImageFont.truetype("arial.ttf", 40)
-        label_font = ImageFont.truetype("arialbd.ttf", 32)  # Bold for labels
+        font = ImageFont.truetype("arial.ttf", 32)
+        label_font = ImageFont.truetype("arialbd.ttf", 28)
     except IOError:
         font = ImageFont.load_default()
         label_font = ImageFont.load_default()
-        logger.warning("Arial font not found, using default. Labels may be small.")
+        logger.warning("Arial font not found, using default.")
 
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
-    color_map = {
-        "Price": (255, 77, 77, 200),   # Red
-        "Text": (255, 179, 64, 200),  # Orange
-        "Image": (77, 135, 255, 200),  # Blue
-    }
-    label_color = (255, 255, 255) # White text
-
-    # Process only the products that have reported issues
+    # Single red color for all error boxes
+    error_box_color = (255, 77, 77, 200)  # Red with transparency
+    text_color = (255, 255, 255)  # White text
+    
+    # Process products with issues
     for rank, differences in issue_details_per_rank.items():
-        if not differences:  # Skip if the list of differences is empty
+        if not differences:
             continue
 
-        # Find the main bounding box for this rank
-        # The rank is 1-based, list index is 0-based
+        # Find the product box for this rank
         if (rank - 1) < len(boxes):
             box_data = boxes[rank - 1]
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
             
-            # --- This is the fix: Only draw the yellow box if there's an actual issue ---
-            draw.rectangle(product_box_coords, outline="yellow", width=5)
+            # Draw yellow outline around the entire product (optional)
+            draw.rectangle(product_box_coords, outline="yellow", width=3)
 
+            # Draw red boxes for each specific difference
             for diff in differences:
                 diff_type = diff.get("type")
-                # Use 'box1' because we are drawing on the canvas of the first PDF image
-                diff_box_coords = diff.get("box1") 
+                diff_box_coords = diff.get("box1")  # Use box1 for first catalog image
                 
                 if not diff_type or not diff_box_coords:
                     continue
 
-                box_color = color_map.get(diff_type, (128, 128, 128, 200))
-                
-                # The VLM gives coordinates relative to the cropped product. Translate them.
+                # Translate coordinates from cropped product to full page
                 offset_x, offset_y = product_box_coords[0], product_box_coords[1]
                 x1, y1, x2, y2 = diff_box_coords
                 abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
                 
-                # Draw the specific box for the error
-                draw.rectangle(abs_box, fill=box_color)
-
-                # Draw the label with a black outline for visibility
-                draw.text((abs_box[0] + 5, abs_box[1] + 5), diff_type, fill=label_color, font=label_font, stroke_width=2, stroke_fill="black")
+                # Draw red error box
+                draw.rectangle(abs_box, fill=error_box_color)
+                
+                # Draw text label below the box
+                label_y = abs_box[3] + 5  # 5 pixels below the box
+                draw.text((abs_box[0], label_y), diff_type, fill=text_color, font=label_font, 
+                         stroke_width=2, stroke_fill="black")
 
     img_copy.save(output_path, "JPEG", quality=90)
-    logger.info(f"Granular visualization saved to: {output_path}")
+    logger.info(f"Visualization with red error boxes saved to: {output_path}")
+
+def validate_same_product(self, product1_path: str, product2_path: str) -> bool:
+    """Optional: Quick brand validation to ensure we're comparing same products"""
+    
+    # Extract just brand names quickly
+    brand1 = self.extract_brand_only(product1_path)
+    brand2 = self.extract_brand_only(product2_path)
+    
+    if brand1 and brand2:
+        similarity = fuzz.ratio(brand1.lower(), brand2.lower())
+        return similarity > 70  # 70% similarity threshold
+    
+    return True  # Assume same product if can't extract brands
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
                                      ranking_method="improved_grid", filter_small_boxes=True,
@@ -1317,109 +1326,36 @@ class PracticalCatalogComparator:
         return is_same, max_score
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
-                                   catalog1_name: str = None, catalog2_name: str = None) -> Dict:
-        """Generate practical comparison focused on what matters"""
-        if not catalog1_name:
-            catalog1_name = Path(folder1_path).name
-        if not catalog2_name:
-            catalog2_name = Path(folder2_path).name
-
-        logger.info(f"Starting practical comparison: {catalog1_name} vs {catalog2_name}")
-        logger.info(f"Focus: Price differences and different products only")
-
-        # Load and process images
+                               catalog1_name: str = None, catalog2_name: str = None) -> Dict:
+    
         catalog1_images = self.load_ranked_images_from_folder(folder1_path)
         catalog2_images = self.load_ranked_images_from_folder(folder2_path)
-
-        # Extract product data
-        logger.info("Extracting focused product data from Catalog 1...")
-        catalog1_products = {}
-        for img_info in catalog1_images:
-            product_data = self.extract_product_data_with_vlm(
-                img_info['file_path'],
-                img_info['rank'],
-                catalog1_name
-            )
-            if "error_message" not in product_data:
-                catalog1_products[img_info['rank']] = product_data
-
-        logger.info("Extracting focused product data from Catalog 2...")
-        catalog2_products = {}
-        for img_info in catalog2_images:
-            product_data = self.extract_product_data_with_vlm(
-                img_info['file_path'],
-                img_info['rank'],
-                catalog2_name
-            )
-            if "error_message" not in product_data:
-                catalog2_products[img_info['rank']] = product_data
-
-        # ===============================================================
-# ADD THIS NEW LOGIC IN ITS PLACE
-# ===============================================================
-
+        
+        # Create lookup dictionaries by rank
+        cat1_by_rank = {img['rank']: img for img in catalog1_images}
+        cat2_by_rank = {img['rank']: img for img in catalog2_images}
+        
         comparison_rows = []
-      
-      # Convert the dictionary of catalog 2 products into a list we can modify
-        unmatched_c2_products = list(catalog2_products.values())
-      
-      # --- Part 1: Find matches for every product in Catalog 1 ---
-        for p1_rank, p1_data in catalog1_products.items():
-          best_match_p2 = None
-          highest_score = -1
-
-          # Find the best possible match in the list of unmatched catalog 2 products
-          for p2_data in unmatched_c2_products:
-              # Use the brand similarity function you already wrote
-              is_match, score = self.are_brands_same_product(
-                  p1_data.get('product_brand'), 
-                  p2_data.get('product_brand')
-              )
-              
-              # If it's a potential match and has a higher score than previous findings
-              if is_match and score > highest_score:
-                  highest_score = score
-                  best_match_p2 = p2_data
-          
-          if best_match_p2:
-              # A confident match was found! Create the comparison row.
-              row = self.create_practical_comparison_row(p1_data, best_match_p2, p1_rank, catalog1_name, catalog2_name)
-              if row:
-                  comparison_rows.append(row)
-              
-              # IMPORTANT: Remove the matched product so it can't be matched again
-              unmatched_c2_products.remove(best_match_p2)
-          else:
-              # No match was found for this catalog 1 product, so it's missing from catalog 2
-              row = self.create_practical_comparison_row(p1_data, None, p1_rank, catalog1_name, catalog2_name)
-              if row:
-                  comparison_rows.append(row)
-
-      # --- Part 2: Handle products that are in Catalog 2 but were never matched ---
-      # These are products missing from Catalog 1
-        for p2_data_unmatched in unmatched_c2_products:
-          p2_rank = p2_data_unmatched.get('rank', 'N/A')
-          row = self.create_practical_comparison_row(None, p2_data_unmatched, p2_rank, catalog1_name, catalog2_name)
-          if row:
-              comparison_rows.append(row)
-
-        result = {
+        max_rank = max(
+            max(cat1_by_rank.keys()) if cat1_by_rank else 0,
+            max(cat2_by_rank.keys()) if cat2_by_rank else 0
+        )
+        
+        # Position-based comparison
+        for rank in range(1, max_rank + 1):
+            product1 = cat1_by_rank.get(rank)
+            product2 = cat2_by_rank.get(rank)
+            
+            row = self.create_position_comparison_row(product1, product2, rank, catalog1_name, catalog2_name)
+            if row:
+                comparison_rows.append(row)
+        
+        return {
             "catalog1_name": catalog1_name,
             "catalog2_name": catalog2_name,
             "comparison_rows": comparison_rows,
-            "catalog1_total_products": len(catalog1_products),
-            "catalog2_total_products": len(catalog2_products),
-            "catalog1_products": catalog1_products,
-            "catalog2_products": catalog2_products,
-            "comparison_criteria": {
-                "price_tolerance": self.price_tolerance,
-                "brand_similarity_threshold": 80,
-                "focus": "Price differences and different products only"
-            }
+            "total_positions_compared": max_rank
         }
-
-        logger.info(f"Practical comparison complete. Generated {len(comparison_rows)} comparison rows.")
-        return result
 
     def create_practical_comparison_row(self, product1: Dict, product2: Dict, rank: int,
                                      catalog1_name: str, catalog2_name: str) -> Dict:
@@ -1596,62 +1532,62 @@ class PracticalCatalogComparator:
 
     # In visual_layout_backend.py, add this new function inside the PracticalCatalogComparator class
 
-    def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> Dict:
-        """
-        Uses a VLM to find specific differences (Price, Text, Image) between two product images
-        and returns their bounding boxes.
-        """
-        try:
-            with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
-                b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
-                b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
-
+    def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
+    
             system_prompt = """
-            You are a hyper-precise visual QA inspector for retail catalogs. Your task is to compare two images of the same product and identify EXACTLY where they differ.
+        You are comparing two versions of the same product position in Spanish retail catalogs for quality control.
 
-            You must identify three types of differences:
-            1.  **Price Difference**: If the main offer prices are different.
-            2.  **Text Difference**: If the brand names, descriptions, or sizes have significant textual differences.
-            3.  **Image Difference**: If the core product photographs themselves are visually different (e.g., different angle, packaging).
+        Identify differences in these categories:
 
-            For EACH difference you find, you MUST return a JSON object with:
-            - "type": One of "Price", "Text", or "Image".
-            - "box1": The bounding box [x1, y1, x2, y2] of the difference in the FIRST image.
-            - "box2": The bounding box [x1, y1, x2, y2] of the difference in the SECOND image.
-            - "description": A brief explanation of the difference (e.g., "$12.97 vs $14.97").
+        1. **Price**: Any difference in the main price numbers (like $12.87 vs $14.97)
+        2. **Text**: Different brand names, product descriptions, or size info  
+        3. **Image**: Different product photos, missing/added promotional badges or stickers
+        4. **Product**: If these appear to be completely different products (different brands/items)
 
-            If there are no differences, return an empty list. Respond ONLY with a valid JSON object containing a list of these difference objects.
-            Example for a price difference: {"differences": [{"type": "Price", "box1": [150, 30, 200, 60], "box2": [152, 31, 201, 62], "description": "$5.99 vs $6.99"}]}
+        For each difference, provide:
+        - "type": "Price", "Text", "Image", or "Product"
+        - "box1": [x1, y1, x2, y2] - coordinates of the difference area in FIRST image
+        - "box2": [x1, y1, x2, y2] - coordinates of the difference area in SECOND image  
+        - "description": Brief explanation (e.g., "$12.87 vs $14.97", "Ace vs All", "Missing red badge")
+
+        Return: {"differences": [list of differences]} or {"differences": []} if identical.
+
+        Note: These should be the same product position in two catalog versions. Focus on actual content differences, ignore minor lighting/angle changes.
             """
+            
+            try:
+                with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
+                    b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
+                    b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
 
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": system_prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
-                    ]
-                }
-            ]
+                messages = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": system_prompt},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
+                        ]
+                    }
+                ]
 
-            logger.info(f"ITEM_ID: {item_id_for_log} - Finding granular differences with VLM...")
-            response = self.openai_client.chat.completions.create(
-                model=self.vlm_model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_tokens=2048
-            )
+                response = self.openai_client.chat.completions.create(
+                    model=self.vlm_model,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                    max_tokens=2048,
+                    temperature=0.1  # Lower temperature for more consistent results
+                )
 
-            response_content = response.choices[0].message.content
-            # The VLM should return a JSON object like: {"differences": [...]}
-            logger.info(f"ITEM_ID: {item_id_for_log} - Raw VLM Response: {response_content}")
-            differences_data = json.loads(response_content)
-            return differences_data.get("differences", [])
+                response_content = response.choices[0].message.content
+                logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
+                
+                differences_data = json.loads(response_content)
+                return differences_data.get("differences", [])
 
-        except Exception as e:
-            logger.error(f"ITEM_ID: {item_id_for_log} - VLM difference detection error: {e}")
-            return [] # Return no differences on error
+            except Exception as e:
+                logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
+                return []
         
 
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
