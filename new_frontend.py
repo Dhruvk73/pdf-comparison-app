@@ -119,6 +119,14 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 "highlighted_pages_file1": [], "highlighted_pages_file2": []
             }
 
+            # --- ADD THIS NEW BLOCK HERE ---
+            # This block populates the details for the frontend summary
+            if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"].get("page_1"):
+                # Assuming single-page comparison for now.
+                vlm_page_results = pipeline_results["step3_vlm_comparison"]["page_1"].get("results", {})
+                frontend_results_to_display["product_comparison_details"] = vlm_page_results.get("comparison_rows", [])
+            # --- END OF NEW BLOCK ---
+
             if pipeline_results.get("errors"):
                 frontend_results_to_display["error"] = "; ".join(map(str,pipeline_results["errors"]))
                 frontend_results_to_display["message"] = "Comparison completed with errors."
@@ -250,6 +258,14 @@ st.markdown("""
     /* Override Streamlit success message text color */
     div[data-testid="stAlert"][kind="success"] p {
         color: #000000 !important; /* Black text color */
+    }
+    
+            /* Target Streamlit's metric components for better visibility */
+    div[data-testid="stMetric"] label {
+        color: #6b7280 !important; /* Sets the label (e.g., "Price Issues") to gray */
+    }
+    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
+        color: #141414 !important; /* Sets the value (e.g., "12") to black */
     }
 </style>
 """, unsafe_allow_html=True)
