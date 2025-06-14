@@ -1120,23 +1120,24 @@ class PracticalCatalogComparator:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
             # Focused VLM prompt - only extract what we need for comparison
+            # In find_differences_with_vlm, replace the entire system_prompt variable with this:
+
             system_prompt = """
-            You are a pragmatic visual QA inspector for retail catalogs. Your goal is to find **only commercially significant differences** between two images of a matched product. Ignore minor, trivial variations.
+            You are a precise visual comparison inspector. Your task is to compare two product images and identify key differences in three specific categories.
 
-            Focus on these three categories:
-            1.  **Price Difference**: ONLY if the final offer prices are different. (e.g., "$12.97" vs. "$14.97").
-            2.  **Text Difference**: ONLY if there is a clear difference in the **Brand Name** or **Product Size/Count** (e.g., "Tide" vs. "Gain", or "50 oz" vs "75 oz"). Ignore minor changes in descriptive text or word order.
-            3.  **Image Difference**: ONLY if the core product photos are **substantially different** (e.g., a completely different product is shown, or the packaging is from a different year/version). Ignore small shifts in position or lighting.
+            Your rules are:
+            1.  **Price Difference**: If the main offer prices are numerically different, report this.
+            2.  **Text Difference**: Focus ONLY on the primary Brand Name and the product's listed Size/Count (e.g., "50 oz", "12 rolls", "8 pack"). Report a difference if these do not match. You MUST ignore minor changes in descriptive words, slogans, or word order.
+            3.  **Image Difference**: Report this ONLY if the product shown is fundamentally different (e.g., a bottle vs. a box, a different product line). You MUST ignore small changes in angle, lighting, or position.
 
-            For EACH significant difference you find, return a JSON object with:
-            - "type": One of "Price", "Text", or "Image".
-            - "box1": The bounding box [x1, y1, x2, y2] of the difference in the FIRST image.
-            - "box2": The bounding box [x1, y1, x2, y2] of the difference in the SECOND image.
-            - "description": A brief explanation of the difference.
+            For EACH valid difference you find based on these rules, return a JSON object with:
+            - "type": "Price", "Text", or "Image".
+            - "box1": The bounding box [x1, y1, x2, y2] of the specific difference in the FIRST image.
+            - "box2": The bounding box [x1, y1, x2, y2] of the specific difference in the SECOND image.
+            - "description": A brief explanation (e.g., "$12.97 vs $14.97", "Brand: Tide vs Gain", "Size: 50 oz vs 75 oz").
 
-            If there are no significant differences, return an empty list. Respond ONLY with a valid JSON object like: {"differences": []}
+            If you find no differences according to these specific rules, return an empty list. Respond ONLY with a valid JSON object formatted as: {"differences": []}
             """
-
             messages = [
                 {
                     "role": "user",
@@ -1644,6 +1645,7 @@ class PracticalCatalogComparator:
 
             response_content = response.choices[0].message.content
             # The VLM should return a JSON object like: {"differences": [...]}
+            logger.info(f"ITEM_ID: {item_id_for_log} - Raw VLM Response: {response_content}")
             differences_data = json.loads(response_content)
             return differences_data.get("differences", [])
 
