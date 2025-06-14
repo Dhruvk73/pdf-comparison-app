@@ -292,10 +292,9 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # Replace the ENTIRE create_ranking_visualization function with this one:
 
-def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, 
-                               issue_details_per_rank: Optional[Dict] = None):
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
-    Creates visualization with RED boxes for all errors and text labels below each box.
+    Creates a visualization with RED boxes for all errors and clear text labels.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy, "RGBA")
@@ -306,32 +305,31 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     except IOError:
         font = ImageFont.load_default()
         label_font = ImageFont.load_default()
-        logger.warning("Arial font not found, using default.")
+        logger.warning("Arial font not found, using default. Labels may be small.")
 
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
-    # Single red color for all error boxes
+    # RED color for all error boxes
     error_box_color = (255, 77, 77, 200)  # Red with transparency
     text_color = (255, 255, 255)  # White text
-    
-    # Process products with issues
+
+    # Process only the products that have reported issues
     for rank, differences in issue_details_per_rank.items():
-        if not differences:
+        if not differences:  # Skip if no issues
             continue
 
-        # Find the product box for this rank
+        # Find the main bounding box for this rank
         if (rank - 1) < len(boxes):
             box_data = boxes[rank - 1]
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
             
-            # Draw yellow outline around the entire product (optional)
-            draw.rectangle(product_box_coords, outline="yellow", width=3)
+            # Optional: Draw yellow outline around entire product with issues
+            draw.rectangle(product_box_coords, outline="yellow", width=4)
 
-            # Draw red boxes for each specific difference
             for diff in differences:
                 diff_type = diff.get("type")
-                diff_box_coords = diff.get("box1")  # Use box1 for first catalog image
+                diff_box_coords = diff.get("box1")  # Use box1 for first catalog
                 
                 if not diff_type or not diff_box_coords:
                     continue
@@ -341,16 +339,16 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                 x1, y1, x2, y2 = diff_box_coords
                 abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
                 
-                # Draw red error box
+                # Draw RED error box
                 draw.rectangle(abs_box, fill=error_box_color)
-                
+
                 # Draw text label below the box
-                label_y = abs_box[3] + 5  # 5 pixels below the box
+                label_y = abs_box[3] + 5  # 5 pixels below the error box
                 draw.text((abs_box[0], label_y), diff_type, fill=text_color, font=label_font, 
                          stroke_width=2, stroke_fill="black")
 
     img_copy.save(output_path, "JPEG", quality=90)
-    logger.info(f"Visualization with red error boxes saved to: {output_path}")
+    logger.info(f"Red error box visualization saved to: {output_path}")
 
 def validate_same_product(self, product1_path: str, product2_path: str) -> bool:
     """Optional: Quick brand validation to ensure we're comparing same products"""
@@ -1327,103 +1325,122 @@ class PracticalCatalogComparator:
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
                                catalog1_name: str = None, catalog2_name: str = None) -> Dict:
-    
+        """Generate practical comparison focused on what matters"""
+        if not catalog1_name:
+            catalog1_name = Path(folder1_path).name
+        if not catalog2_name:
+            catalog2_name = Path(folder2_path).name
+
+        logger.info(f"Starting practical comparison: {catalog1_name} vs {catalog2_name}")
+        logger.info(f"Focus: Position-based comparison for quality control")
+
+        # Load and process images
         catalog1_images = self.load_ranked_images_from_folder(folder1_path)
         catalog2_images = self.load_ranked_images_from_folder(folder2_path)
-        
-        # Create lookup dictionaries by rank
+
+        # Create lookup dictionaries by rank for easy access
         cat1_by_rank = {img['rank']: img for img in catalog1_images}
         cat2_by_rank = {img['rank']: img for img in catalog2_images}
-        
+
         comparison_rows = []
+        
+        # Get maximum rank to compare
         max_rank = max(
             max(cat1_by_rank.keys()) if cat1_by_rank else 0,
             max(cat2_by_rank.keys()) if cat2_by_rank else 0
         )
         
-        # Position-based comparison
+        logger.info(f"Comparing {max_rank} positions between catalogs")
+
+        # POSITION-BASED COMPARISON (no brand matching needed)
         for rank in range(1, max_rank + 1):
-            product1 = cat1_by_rank.get(rank)
-            product2 = cat2_by_rank.get(rank)
+            product1_info = cat1_by_rank.get(rank)  # Product at this position in catalog 1
+            product2_info = cat2_by_rank.get(rank)  # Product at this position in catalog 2
             
-            row = self.create_position_comparison_row(product1, product2, rank, catalog1_name, catalog2_name)
+            # Create comparison row using existing function
+            row = self.create_practical_comparison_row(
+                product1_info, product2_info, rank, catalog1_name, catalog2_name
+            )
             if row:
                 comparison_rows.append(row)
-        
-        return {
+
+        result = {
             "catalog1_name": catalog1_name,
             "catalog2_name": catalog2_name,
             "comparison_rows": comparison_rows,
-            "total_positions_compared": max_rank
+            "catalog1_total_products": len(catalog1_images),
+            "catalog2_total_products": len(catalog2_images),
+            "total_positions_compared": max_rank,
+            "comparison_criteria": {
+                "comparison_type": "Position-based Quality Control",
+                "focus": "Position-to-position comparison for production error detection"
+            }
         }
 
-    def create_practical_comparison_row(self, product1: Dict, product2: Dict, rank: int,
-                                     catalog1_name: str, catalog2_name: str) -> Dict:
-        """Create practical comparison row - only flag real issues"""
+        logger.info(f"Position-based comparison complete. Generated {len(comparison_rows)} comparison rows.")
+        return result
 
+
+    def create_practical_comparison_row(self, product1: Dict, product2: Dict, rank: int,
+                                 catalog1_name: str, catalog2_name: str) -> Dict:
+        """Create comparison row for position-based comparison"""
+
+        # Handle missing products at this position
         if not product1 and not product2:
             return None
 
-        # Handle missing products
         if not product1:
-            p2_info = self.format_product_display(product2)
             return {
-                f"{catalog1_name}_details": "Product Missing",
-                f"{catalog2_name}_details": p2_info,
+                f"{catalog1_name}_details": "MISSING PRODUCT",
+                f"{catalog2_name}_details": f"Position {rank} - Product Present",
                 "comparison_result": "INCORRECT - Missing Product",
                 "issue_type": "Missing Product",
-                "details": f"Product missing in {catalog1_name}",
-                "price_match": "N/A",
-                "brand_match": "N/A"
+                "details": f"Product missing in {catalog1_name} at position {rank}",
+                "granular_differences": []
             }
 
         if not product2:
-            p1_info = self.format_product_display(product1)
             return {
-                f"{catalog1_name}_details": p1_info,
-                f"{catalog2_name}_details": "Product Missing",
+                f"{catalog1_name}_details": f"Position {rank} - Product Present",
+                f"{catalog2_name}_details": "MISSING PRODUCT",
                 "comparison_result": "INCORRECT - Missing Product",
                 "issue_type": "Missing Product",
-                "details": f"Product missing in {catalog2_name}",
-                "price_match": "N/A",
-                "brand_match": "N/A"
+                "details": f"Product missing in {catalog2_name} at position {rank}",
+                "granular_differences": []
             }
 
-        # Both products are present, find granular differences
-        item_id_for_log = f"{catalog1_name}-Rank{rank}"
+        # Both products exist at this position - compare them directly
+        item_id_for_log = f"Position{rank}"
         
-        # Call the new VLM function to get specific differences
+        # Call VLM to find specific differences
         differences = self.find_differences_with_vlm(
-            product1['image_path'],
-            product2['image_path'],
+            product1['file_path'],
+            product2['file_path'],
             item_id_for_log
         )
 
-        p1_display = self.format_product_display(product1)
-        p2_display = self.format_product_display(product2)
-        
         if not differences:
-            # No differences found, it's a correct match
+            # No differences found - products are identical
             return {
-                f"{catalog1_name}_details": p1_display,
-                f"{catalog2_name}_details": p2_display,
+                f"{catalog1_name}_details": f"Position {rank} - Product Present",
+                f"{catalog2_name}_details": f"Position {rank} - Product Present",
                 "comparison_result": "CORRECT",
                 "issue_type": "Match Confirmed",
-                "details": "Products appear to be identical.",
-                "granular_differences": [] # No specific issues
+                "details": "Products are identical at this position",
+                "granular_differences": []
             }
         else:
-            # Differences were found, categorize and list them
+            # Differences found - categorize them
             issue_types = sorted(list(set([d['type'] for d in differences])))
             
             return {
-                f"{catalog1_name}_details": p1_display,
-                f"{catalog2_name}_details": p2_display,
+                f"{catalog1_name}_details": f"Position {rank} - Product Present",
+                f"{catalog2_name}_details": f"Position {rank} - Product Present",
                 "comparison_result": "INCORRECT",
                 "issue_type": ", ".join(issue_types),
                 "details": "; ".join([d['description'] for d in differences]),
-                "granular_differences": differences # Pass the detailed box info
-        }
+                "granular_differences": differences
+            }
 
     def format_product_display(self, product: Dict) -> str:
         """Format product for display with safe None handling"""
