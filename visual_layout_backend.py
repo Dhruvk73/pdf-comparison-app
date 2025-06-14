@@ -1557,39 +1557,44 @@ class PracticalCatalogComparator:
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
     
         system_prompt = """
-    You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS.
+        You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS.
 
-    Your task: Compare these products and identify obvious quality control issues.
+        Your task: Compare these products and identify obvious quality control issues.
 
-    Look for these types of errors:
+        Look for these types of errors:
 
-    1. **Price Errors**: 
-    - Same/similar products with significantly different prices (>$3 difference)
-    - Obvious price typos (like $199.99 vs $19.99)
-    - Missing prices or price formatting errors
+        1. **Price Errors**: 
+        - Same/similar products with significantly different prices (>$3 difference)
+        - Obvious price typos (like $199.99 vs $19.99)
+        - Missing prices or price formatting errors
 
-    2. **Text Errors**:
-    - Clear spelling mistakes or typos in product names
-    - Missing or garbled text
-    - Wrong product descriptions that don't match the image
+        2. **Text Errors**:
+        - Clear spelling mistakes or typos in product names
+        - Missing or garbled text
+        - Wrong product descriptions that don't match the image
 
-    3. **Image Errors**:
-    - Obviously wrong product photos (detergent showing a car)
-    - Corrupted, missing, or broken images
-    - Misaligned or overlapping elements
+        3. **Image Errors**:
+        - Obviously wrong product photos (detergent showing a car)
+        - Corrupted, missing, or broken images
+        - Misaligned or overlapping elements
 
-    4. **Layout Errors**:
-    - Text cut off or overlapping images
-    - Missing important information like sizes or brands
+        4. **Layout Errors**:
+        - Text cut off or overlapping images
+        - Missing important information like sizes or brands
 
-    IGNORE these normal variations:
-    - Different brands in the same position (Tide vs Gain is normal)
-    - Different product categories (detergent vs paper towels is normal)
-    - Minor price differences (<$3)
-    - Different promotional banners or seasonal decorations
-    - Minor lighting or color variations
+        IGNORE these normal variations:
+        - Different brands in the same position (Tide vs Gain is normal)
+        - Different product categories (detergent vs paper towels is normal)
+        - Minor price differences (<$3)
+        - Different promotional banners or seasonal decorations
+        - Minor lighting or color variations
 
-    Only report actual production errors that would require fixing. Return JSON format: {"differences": []} or {"differences": [list]}.
+        IMPORTANT: Return your response in this EXACT JSON format:
+        {"differences": [{"type": "Price Error", "description": "Price difference details"}, {"type": "Text Error", "description": "Text issue details"}]}
+
+        If no issues found, return: {"differences": []}
+
+        Only report actual production errors that would require fixing.
         """
         
         try:
@@ -1613,29 +1618,81 @@ class PracticalCatalogComparator:
                 messages=messages,
                 response_format={"type": "json_object"},
                 max_tokens=1000,
-                temperature=0.1  # Slightly higher for more nuanced responses
+                temperature=0.1
             )
 
             response_content = response.choices[0].message.content
             logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
             
             differences_data = json.loads(response_content)
-            differences_list = differences_data.get("differences", [])
+            raw_differences = differences_data.get("differences", [])
             
-            # DEBUG: Check the structure
-            if differences_list:
-                logger.info(f"ITEM_ID: {item_id_for_log} - Found {len(differences_list)} differences")
-                for i, diff in enumerate(differences_list):
-                    logger.info(f"ITEM_ID: {item_id_for_log} - Diff {i}: {diff}")
-                    if not isinstance(diff, dict) or 'type' not in diff:
-                        logger.error(f"ITEM_ID: {item_id_for_log} - Malformed difference: {diff}")
+            # Normalize the differences to ensure consistent format
+            normalized_differences = []
             
-            return differences_list
+            for i, diff in enumerate(raw_differences):
+                if not isinstance(diff, dict):
+                    logger.warning(f"ITEM_ID: {item_id_for_log} - Skipping non-dict difference at index {i}: {diff}")
+                    continue
+                
+                # Create normalized difference object
+                normalized_diff = {}
+                
+                # Handle different possible field names for "type"
+                if "type" in diff:
+                    normalized_diff["type"] = diff["type"]
+                elif "issue" in diff:
+                    normalized_diff["type"] = diff["issue"]
+                elif "category" in diff:
+                    normalized_diff["type"] = diff["category"]
+                else:
+                    # Default type based on content analysis
+                    desc = str(diff.get("description", diff.get("details", "")))
+                    if "price" in desc.lower():
+                        normalized_diff["type"] = "Price Error"
+                    elif "text" in desc.lower() or "name" in desc.lower():
+                        normalized_diff["type"] = "Text Error"
+                    else:
+                        normalized_diff["type"] = "Unknown Error"
+                    logger.warning(f"ITEM_ID: {item_id_for_log} - No 'type' field found, inferred: {normalized_diff['type']}")
+                
+                # Handle different possible field names for "description"
+                if "description" in diff:
+                    normalized_diff["description"] = diff["description"]
+                elif "details" in diff:
+                    normalized_diff["description"] = diff["details"]
+                elif "message" in diff:
+                    normalized_diff["description"] = diff["message"]
+                else:
+                    # Create description from available fields
+                    product = diff.get("product", "")
+                    issue = diff.get("issue", diff.get("type", ""))
+                    normalized_diff["description"] = f"{product}: {issue}" if product else str(issue)
+                
+                # Copy over any bounding box information if present
+                if "box1" in diff:
+                    normalized_diff["box1"] = diff["box1"]
+                if "box2" in diff:
+                    normalized_diff["box2"] = diff["box2"]
+                
+                # Add any other fields that might be useful
+                for key, value in diff.items():
+                    if key not in ["type", "description", "details", "issue", "message", "box1", "box2"]:
+                        normalized_diff[key] = value
+                
+                normalized_differences.append(normalized_diff)
+                logger.info(f"ITEM_ID: {item_id_for_log} - Normalized Diff {i}: Type='{normalized_diff['type']}', Desc='{normalized_diff.get('description', 'N/A')[:50]}...'")
+            
+            logger.info(f"ITEM_ID: {item_id_for_log} - Successfully processed {len(normalized_differences)} differences")
+            return normalized_differences
 
+        except json.JSONDecodeError as e:
+            logger.error(f"ITEM_ID: {item_id_for_log} - JSON parsing error: {e}")
+            logger.error(f"ITEM_ID: {item_id_for_log} - Raw response: {response_content}")
+            return []
         except Exception as e:
             logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
             return []
-
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                        catalog1_name: str = None, catalog2_name: str = None,
                        output_path: str = None, price_tolerance: float = 0.01):
