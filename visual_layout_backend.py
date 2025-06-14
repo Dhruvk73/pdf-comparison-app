@@ -290,26 +290,27 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # In SCRIPT 1
 
+# Replace the ENTIRE create_ranking_visualization function with this one:
+
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
-    Create a visualization showing the ranking order on the original image.
-    Only highlights issues in red if issue_product_ranks is provided and is not empty.
-    Correct products will not have any boxes drawn on them.
+    Creates a visualization with CLEAR, readable highlights for specific, significant issues.
     """
     img_copy = pil_img.copy()
-    draw = ImageDraw.Draw(img_copy)
+    draw = ImageDraw.Draw(img_copy, "RGBA")
 
     try:
-        font = ImageFont.truetype("arial.ttf", 24)
-        label_font = ImageFont.truetype("arialbd.ttf", 20) # Bold for labels
+        # Increased font sizes for better readability
+        font = ImageFont.truetype("arial.ttf", 40)
+        label_font = ImageFont.truetype("arialbd.ttf", 32)  # Bold for labels
     except IOError:
         font = ImageFont.load_default()
         label_font = ImageFont.load_default()
+        logger.warning("Arial font not found, using default. Labels may be small.")
 
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
-    # Define colors for each issue type
     color_map = {
         "Price": (255, 77, 77, 200),   # Red
         "Text": (255, 179, 64, 200),  # Orange
@@ -317,44 +318,43 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     }
     label_color = (255, 255, 255) # White text
 
-    for idx, box_data in enumerate(boxes):
-        current_rank = idx + 1
-        
-        if current_rank in issue_details_per_rank:
-            product_differences = issue_details_per_rank[current_rank]
-            
-            # Draw a faint box around the whole product to show it has an issue
+    # Process only the products that have reported issues
+    for rank, differences in issue_details_per_rank.items():
+        if not differences:  # Skip if the list of differences is empty
+            continue
+
+        # Find the main bounding box for this rank
+        # The rank is 1-based, list index is 0-based
+        if (rank - 1) < len(boxes):
+            box_data = boxes[rank - 1]
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
             
+            # --- This is the fix: Only draw the yellow box if there's an actual issue ---
+            draw.rectangle(product_box_coords, outline="yellow", width=5)
 
-            for diff in product_differences:
+            for diff in differences:
                 diff_type = diff.get("type")
-                diff_box = diff.get("box1") # We are drawing on the first image's canvas
+                # Use 'box1' because we are drawing on the canvas of the first PDF image
+                diff_box_coords = diff.get("box1") 
                 
-                if not diff_type or not diff_box:
+                if not diff_type or not diff_box_coords:
                     continue
 
-                box_color = color_map.get(diff_type, (128, 128, 128, 200)) # Default gray
+                box_color = color_map.get(diff_type, (128, 128, 128, 200))
                 
-                # The VLM returns coordinates relative to the cropped image. We must translate them
-                # to be relative to the full page image.
+                # The VLM gives coordinates relative to the cropped product. Translate them.
                 offset_x, offset_y = product_box_coords[0], product_box_coords[1]
-                x1, y1, x2, y2 = diff_box
+                x1, y1, x2, y2 = diff_box_coords
                 abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
                 
-                # Draw the specific error box
-                draw.rectangle(abs_box, outline=box_color, width=4)
+                # Draw the specific box for the error
+                draw.rectangle(abs_box, fill=box_color)
 
-                # Draw the label (e.g., "Price")
-                label_bg_box = [abs_box[0], abs_box[1] - 25, abs_box[0] + 70, abs_box[1]]
-                draw.rectangle(label_bg_box, fill=box_color)
-                draw.text((label_bg_box[0] + 5, label_bg_box[1] + 2), diff_type, fill=label_color, font=label_font)
+                # Draw the label with a black outline for visibility
+                draw.text((abs_box[0] + 5, abs_box[1] + 5), diff_type, fill=label_color, font=label_font, stroke_width=2, stroke_fill="black")
 
-    # Save the final image
     img_copy.save(output_path, "JPEG", quality=90)
     logger.info(f"Granular visualization saved to: {output_path}")
-
-# In SCRIPT 1
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
                                      ranking_method="improved_grid", filter_small_boxes=True,
@@ -1120,47 +1120,22 @@ class PracticalCatalogComparator:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
             # Focused VLM prompt - only extract what we need for comparison
-            system_prompt = """You are a product information extraction expert for retail catalog comparison.
-            Focus ONLY on extracting the essential information needed for accurate product matching.
+            system_prompt = """
+            You are a pragmatic visual QA inspector for retail catalogs. Your goal is to find **only commercially significant differences** between two images of a matched product. Ignore minor, trivial variations.
 
-            EXTRACTION PRIORITIES (in order of importance):
+            Focus on these three categories:
+            1.  **Price Difference**: ONLY if the final offer prices are different. (e.g., "$12.97" vs. "$14.97").
+            2.  **Text Difference**: ONLY if there is a clear difference in the **Brand Name** or **Product Size/Count** (e.g., "Tide" vs. "Gain", or "50 oz" vs "75 oz"). Ignore minor changes in descriptive text or word order.
+            3.  **Image Difference**: ONLY if the core product photos are **substantially different** (e.g., a completely different product is shown, or the packaging is from a different year/version). Ignore small shifts in position or lighting.
 
-            1. PRICES (CRITICAL):
-               - Strictly Extract the Main offer price (large, prominent price - usually placed top-right)
-               - Strictly Extract Regular price  (which will be given below the product with the description)
-               - Format handling: "8 87" → 8.87, "887" → 8.87, "1097" → 10.97
-               - Unit indicators: "c/u", "ea.", "each"
+            For EACH significant difference you find, return a JSON object with:
+            - "type": One of "Price", "Text", or "Image".
+            - "box1": The bounding box [x1, y1, x2, y2] of the difference in the FIRST image.
+            - "box2": The bounding box [x1, y1, x2, y2] of the difference in the SECOND image.
+            - "description": A brief explanation of the difference.
 
-            2. BRAND IDENTIFICATION (CRITICAL):
-               - Brand name from packaging, logos, or text
-               - Extract exactly as shown, including variants like for e.g "Ace Simply"
-               - Focus on the main brand, not minor descriptors
-
-            3. PRODUCT BASICS:
-               - Core product name/type (detergent, cleaner, etc.)
-               - Size/quantity if clearly visible
-               - Only extract what's clearly readable - don't guess
-
-            4. IGNORE MINOR DETAILS:
-               - Don't worry about exact wording of descriptions
-               - Skip fine print unless it's price-related
-               - Focus on core product identity, not marketing language
-
-            COMPARISON FOCUS:
-            The goal is to compare if these are the SAME PRODUCT at the SAME PRICE.
-            Minor text differences, word order, or description variations don't matter.
-            What matters: Brand match + Price match + Basic product type match.
-
-            Return JSON with these fields:
-            - "offer_price": Main price (decimal or null)
-            - "regular_price": Regular price if shown (decimal or null)
-            - "product_brand": Primary brand name
-            - "product_type": Basic product type (detergent, cleaner, etc.)
-            - "size_quantity": Size if clearly visible
-            - "product_status": "Product Present" or "Product Missing"
-            - "confidence_score": How confident you are in the extraction (1-10)
-
-            Be precise with prices and brands which are present. Extract as it is. Be flexible with everything else. Strictly do not generate any information on your own"""
+            If there are no significant differences, return an empty list. Respond ONLY with a valid JSON object like: {"differences": []}
+            """
 
             messages = [
                 {
