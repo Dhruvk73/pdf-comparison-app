@@ -1474,10 +1474,7 @@ class PracticalCatalogComparator:
             f"{catalog2_name}_details",
             "comparison_result",
             "issue_type",
-            "details",
-            "price_match",
-            "brand_match",
-            "brand_similarity"
+            "details"
         ]
 
         # Ensure all columns exist
@@ -1485,49 +1482,58 @@ class PracticalCatalogComparator:
             if col not in df.columns:
                 df[col] = "N/A"
 
-        df = df.reindex(columns=column_order)
+        # Only include columns that actually exist
+        existing_columns = [col for col in column_order if col in df.columns]
+        df = df.reindex(columns=existing_columns)
 
         # Rename columns
-        df.columns = [
+        new_column_names = [
             f"{catalog1_name} Details",
             f"{catalog2_name} Details",
             "Comparison Result",
             "Issue Type",
-            "Details",
-            "Price Match",
-            "Brand Match",
-            "Brand Similarity %"
+            "Details"
         ]
+        df.columns = new_column_names[:len(existing_columns)]
 
         # Create practical summary
         total_rows = len(comparison_result["comparison_rows"])
-        correct_matches = len([r for r in comparison_result["comparison_rows"] if r.get("comparison_result", "").startswith("CORRECT")])
-        price_issues = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Price Difference"])
-        different_products = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Different Product"])
-        missing_products = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Missing Product"])
+        correct_matches = len([r for r in comparison_result["comparison_rows"] 
+                            if r.get("comparison_result", "").startswith("CORRECT")])
+        
+        # Count different issue types
+        price_issues = len([r for r in comparison_result["comparison_rows"] 
+                        if "Price" in r.get("issue_type", "")])
+        text_issues = len([r for r in comparison_result["comparison_rows"] 
+                        if "Text" in r.get("issue_type", "")])
+        image_issues = len([r for r in comparison_result["comparison_rows"] 
+                        if "Image" in r.get("issue_type", "")])
+        missing_products = len([r for r in comparison_result["comparison_rows"] 
+                            if r.get("issue_type") == "Missing Product"])
 
+        # FIXED SUMMARY DATA
         summary_data = {
             "Metric": [
                 "Total Comparisons",
                 "Correct Matches",
                 "Price Issues",
-                "Different Products",
+                "Text Issues", 
+                "Image Issues",
                 "Missing Products",
                 "Match Rate (%)",
-                "Price Tolerance Used",
-                "Brand Similarity Threshold",
-                "Comparison Focus"
+                "Comparison Type",
+                "Focus"
             ],
             "Value": [
                 total_rows,
                 correct_matches,
                 price_issues,
-                different_products,
+                text_issues,
+                image_issues,
                 missing_products,
                 f"{(correct_matches/max(total_rows,1)*100):.1f}%",
-                f"${comparison_result['comparison_criteria']['price_tolerance']}",
-                f"{comparison_result['comparison_criteria']['brand_similarity_threshold']}%",
-                comparison_result['comparison_criteria']['focus']
+                comparison_result['comparison_criteria'].get('comparison_type', 'Position-based'),
+                comparison_result['comparison_criteria'].get('focus', 'Quality Control')
             ]
         }
         summary_df = pd.DataFrame(summary_data)
@@ -1535,19 +1541,18 @@ class PracticalCatalogComparator:
         # Export to Excel
         output_path = Path(output_path)
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Practical_Comparison', index=False)
+            df.to_excel(writer, sheet_name='Position_Comparison', index=False)
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
 
-        logger.info(f"Practical comparison exported to {output_path}")
-        print(f"\nPRACTICAL COMPARISON SUMMARY:")
+        logger.info(f"Position-based comparison exported to {output_path}")
+        print(f"\nPOSITION-BASED COMPARISON SUMMARY:")
         print(f"Total comparisons: {total_rows}")
         print(f"Correct matches: {correct_matches}")
         print(f"Price issues: {price_issues}")
-        print(f"Different products: {different_products}")
+        print(f"Text issues: {text_issues}")
+        print(f"Image issues: {image_issues}")
         print(f"Missing products: {missing_products}")
         print(f"Match rate: {(correct_matches/max(total_rows,1)*100):.1f}%")
-
-    # In visual_layout_backend.py, add this new function inside the PracticalCatalogComparator class
 
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
     
