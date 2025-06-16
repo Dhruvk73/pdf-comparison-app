@@ -301,6 +301,9 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     draw = ImageDraw.Draw(img_copy, "RGBA")
 
     # FIXED: Try to load larger fonts with fallbacks
+    font = None
+    label_font = None
+    
     try:
         # Try different font sizes - much larger than before
         font = ImageFont.truetype("arial.ttf", 60)  # Increased from 40
@@ -314,26 +317,27 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             logger.info("Successfully loaded Arial fonts (alternative names)")
         except IOError:
             try:
-                # Try system default with larger size
-                font = ImageFont.load_default()
-                label_font = ImageFont.load_default()
-                # Try to get a bigger default font if available
+                # Try Windows system fonts
+                font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 60)
+                label_font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 50)
+                logger.info("Successfully loaded Windows system fonts")
+            except IOError:
                 try:
-                    from PIL import ImageFont
-                    font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 60)  # macOS
+                    # Try macOS system fonts
+                    font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 60)
                     label_font = ImageFont.truetype("/System/Library/Fonts/Arial Bold.ttf", 50)
                     logger.info("Successfully loaded macOS system fonts")
-                except:
-                    try:
-                        font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 60)  # Windows
-                        label_font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 50)
-                        logger.info("Successfully loaded Windows system fonts")
-                    except:
-                        logger.warning("Using default fonts - text may be small")
-            except:
-                font = ImageFont.load_default()
-                label_font = ImageFont.load_default()
-                logger.warning("Using default fonts - text may be small")
+                except IOError:
+                    # Use default fonts as final fallback
+                    font = ImageFont.load_default()
+                    label_font = ImageFont.load_default()
+                    logger.warning("Using default fonts - text may be small")
+    
+    # Ensure fonts are set (should never happen, but safety check)
+    if font is None:
+        font = ImageFont.load_default()
+    if label_font is None:
+        label_font = ImageFont.load_default()
 
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
@@ -510,6 +514,8 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     logger.info(f"Image dimensions: {img_copy.width}x{img_copy.height}")
     logger.info(f"Font used: {type(font)} at size 60")
     logger.info(f"Label font used: {type(label_font)} at size 50")
+
+    
 
 def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
