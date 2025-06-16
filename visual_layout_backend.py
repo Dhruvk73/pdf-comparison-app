@@ -290,11 +290,18 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # In SCRIPT 1
 
-def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_product_ranks: Optional[set] = None):
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details: Optional[Dict[int, str]] = None):
     """
     Create a visualization showing the ranking order on the original image.
-    Only highlights issues in red if issue_product_ranks is provided and is not empty.
+    Highlights issues in red and adds a text label describing the issue.
     Correct products will not have any boxes drawn on them.
+
+    Args:
+        pil_img (Image.Image): The original page image.
+        boxes (List[Dict]): The list of all detected product boxes on the page.
+        output_path (str): The path to save the output image.
+        issue_details (Optional[Dict[int, str]]): A dictionary mapping the rank of an item
+                                                   to the type of issue (e.g., {5: "Price", 7: "Brand"}).
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
@@ -309,28 +316,25 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             font = ImageFont.load_default()
             logger.warning("Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
 
-    # default_box_color = "blue" # REMOVED - No default boxes for correct items
     issue_box_color = "red"
     font_color = "black"
-    font_background_color = "yellow" # For the rank number background
+    font_background_color = "yellow"
 
     if not boxes:
         logger.info(f"No boxes to visualize for {output_path}. Saving original image.")
-        # EXISTING (or implied previous quality):
-        # img_copy.save(output_path, "JPEG", quality=95) 
-        # NEW (optimized for display):
-        img_copy.save(output_path, "JPEG", quality=85) 
+        img_copy.save(output_path, "JPEG", quality=85)
         return
 
-    if issue_product_ranks is None: # Ensure issue_product_ranks is a set for efficient lookup
-        issue_product_ranks = set()
+    if issue_details is None:
+        issue_details = {}
 
-    for idx, box_data in enumerate(boxes): # Renamed 'box' to 'box_data' for clarity
-        current_rank = idx + 1  # Rank is 1-based from the list order
+    for idx, box_data in enumerate(boxes):
+        current_rank = idx + 1  # Rank is 1-based
 
-        # --- NEW LOGIC: Only draw if it's an issue ---
-        if current_rank in issue_product_ranks:
-            box_outline_color_to_use = issue_box_color # It's an issue, use red
+        # --- MODIFIED LOGIC: Check for issue and get its label ---
+        if current_rank in issue_details:
+            issue_label = issue_details.get(current_rank, "Issue") # Get the issue type
+            box_outline_color_to_use = issue_box_color
 
             left = int(box_data.get("left", 0))
             top = int(box_data.get("top", 0))
@@ -339,30 +343,30 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
 
             draw.rectangle([left, top, right, bottom], outline=box_outline_color_to_use, width=4)
 
-            rank_text = str(current_rank)
-            # Use textbbox for modern PIL to get accurate text size
+            # --- NEW: Combine rank and issue label for display ---
+            rank_text = f"{current_rank} - {issue_label}"
+
             try:
                 text_bbox = draw.textbbox((0, 0), rank_text, font=font)
                 text_width = text_bbox[2] - text_bbox[0]
                 text_height = text_bbox[3] - text_bbox[1]
             except AttributeError: # Fallback for older Pillow versions
                 text_width, text_height = draw.textsize(rank_text, font=font)
-            
-            text_x = left + 5  # Position rank number inside the box
+
+            text_x = left + 5  # Position text inside the box
             text_y = top + 5
 
-            # Draw background for the rank number for better visibility
+            # Draw background for the text for better visibility
             draw.rectangle(
                 [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
                 fill=font_background_color,
-                outline="black", 
+                outline="black",
                 width=1
             )
             draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
 
     img_copy.save(output_path, "JPEG", quality=85)
-    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks and len(issue_product_ranks) > 0)})")
-    # print(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks)})")
+    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_details)})")
 
 # In SCRIPT 1
 
@@ -1906,7 +1910,16 @@ def catalog_comparison_pipeline(
 
         if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"]:
             vlm_all_pages_data = pipeline_results["step3_vlm_comparison"]
-            logger.info("Updating visualizations with VLM comparison results...")
+            logger.info("Updating visualizations with VLM comparison results and issue labels...")
+
+            # --- NEW: Define a mapping for concise issue labels ---
+            issue_label_map = {
+                "Missing Product": "Missing",
+                "Different Product": "Brand",
+                "Price Difference": "Price",
+                "Multiple Issues": "Issue"
+            }
+
 
             # Iterate through each page's VLM results
             for page_id_key, page_vlm_data in vlm_all_pages_data.items(): # e.g., page_id_key = "page_1"
@@ -1924,46 +1937,35 @@ def catalog_comparison_pipeline(
                 comparison_rows = vlm_results_for_page.get("comparison_rows", [])
                 
                 # Determine issue ranks for catalog 1 and catalog 2 for the current page
-                issue_ranks_cat1 = set()
-                issue_ranks_cat2 = set()
+                issue_details_cat1 = {}
+                issue_details_cat2 = {}
 
-                # The comparison_rows are generated by iterating ranks from 1 to max_rank.
-                # So, the index of the row + 1 gives the rank on the page.
                 for rank_idx, row_data in enumerate(comparison_rows):
-                    current_rank_on_page = rank_idx + 1 
-                    
+                    current_rank_on_page = rank_idx + 1
+
                     comparison_status = row_data.get("comparison_result", "")
                     issue_type = row_data.get("issue_type", "")
                     details = row_data.get("details", "")
                     
-                    # Catalog names as used in VLM results (e.g., "Catalog1_Page1")
-                    vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1") 
+                    # Get the concise label for the UI
+                    issue_label = issue_label_map.get(issue_type, "Issue")
+
+                    vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1")
                     vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
 
-                    # Check if product from catalog 1 was part of this row's comparison
-                    # (i.e., not reported as "Product Missing" for catalog 1 in this specific row)
-                    product1_in_row_details = row_data.get(f"{vlm_cat1_name}_details", "")
-                    is_product1_present_in_row = not ("Product Missing" in product1_in_row_details if isinstance(product1_in_row_details, str) else True)
-
-                    product2_in_row_details = row_data.get(f"{vlm_cat2_name}_details", "")
-                    is_product2_present_in_row = not ("Product Missing" in product2_in_row_details if isinstance(product2_in_row_details, str) else True)
-
                     if comparison_status.startswith("INCORRECT"):
-                        # --- START: CORRECTED LOGIC ---
                         if issue_type == "Missing Product":
-                            # Check if the error message says it's missing in Catalog 2
                             if "missing in " + vlm_cat2_name in details:
-                                # If Cat 2 is missing, highlight the product that exists in Cat 1.
-                                issue_ranks_cat1.add(current_rank_on_page)
-                            # Check if the error message says it's missing in Catalog 1
+                                # Product exists in Cat 1, but missing in Cat 2. Label it in Cat 1.
+                                issue_details_cat1[current_rank_on_page] = "Not Found"
                             elif "missing in " + vlm_cat1_name in details:
-                                # If Cat 1 is missing, highlight the product that exists in Cat 2.
-                                issue_ranks_cat2.add(current_rank_on_page)
+                                # Product exists in Cat 2, but missing in Cat 1. Label it in Cat 2.
+                                issue_details_cat2[current_rank_on_page] = "Not Found"
                         
-                        # This part was already correct. It handles issues where both products exist but are different.
                         elif issue_type in ["Different Product", "Price Difference", "Multiple Issues"]:
-                            issue_ranks_cat1.add(current_rank_on_page)
-                            issue_ranks_cat2.add(current_rank_on_page)
+                            # The issue applies to both products, so label both.
+                            issue_details_cat1[current_rank_on_page] = issue_label
+                            issue_details_cat2[current_rank_on_page] = issue_label
 
 
                 # Regenerate visualization for Catalog 1, Page `page_num`
@@ -1971,19 +1973,18 @@ def catalog_comparison_pipeline(
                     page_info_c1 = pdf_results["page_level_data_catalog1"][page_num]
                     pil_img_c1 = page_info_c1.get('image_pil')
                     ranked_boxes_c1 = page_info_c1.get('ranked_boxes')
-                    # Path where cropped images (and thus visualizations) for this page are stored
-                    page_folder_c1 = Path(page_info_c1.get('page_folder_path')) 
+                    page_folder_c1 = Path(page_info_c1.get('page_folder_path'))
                     
                     if pil_img_c1 and ranked_boxes_c1 and page_folder_c1.exists():
-                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
+                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg"
                         viz_output_path_c1 = page_folder_c1 / viz_filename_c1
                         create_ranking_visualization(
                             pil_img=pil_img_c1,
                             boxes=ranked_boxes_c1,
                             output_path=str(viz_output_path_c1),
-                            issue_product_ranks=issue_ranks_cat1 # Pass the identified issue ranks
+                            issue_details=issue_details_cat1 # Pass the detailed issue dictionary
                         )
-                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
+                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issue details: {issue_details_cat1}")
                     else:
                         logger.warning(f"Could not update viz for Cat1 Page {page_num}, missing PIL/boxes or folder path.")
 
@@ -1995,19 +1996,19 @@ def catalog_comparison_pipeline(
                     page_folder_c2 = Path(page_info_c2.get('page_folder_path'))
 
                     if pil_img_c2 and ranked_boxes_c2 and page_folder_c2.exists():
-                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
+                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg"
                         viz_output_path_c2 = page_folder_c2 / viz_filename_c2
                         create_ranking_visualization(
                             pil_img=pil_img_c2,
                             boxes=ranked_boxes_c2,
                             output_path=str(viz_output_path_c2),
-                            issue_product_ranks=issue_ranks_cat2 # Pass the identified issue ranks
+                            issue_details=issue_details_cat2 # Pass the detailed issue dictionary
                         )
-                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
+                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issue details: {issue_details_cat2}")
                     else:
                         logger.warning(f"Could not update viz for Cat2 Page {page_num}, missing PIL/boxes or folder path.")
         else:
-            logger.info("No VLM comparison results found or step3_vlm_comparison is empty. Visualizations will not be updated with VLM issues.")
+            logger.info("No VLM comparison results found. Visualizations will not be updated with VLM issues.")
 
         # ==============================
         # STEP 4: CONSOLIDATE RESULTS
