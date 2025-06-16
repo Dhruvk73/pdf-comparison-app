@@ -290,18 +290,11 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # In SCRIPT 1
 
-def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details: Optional[Dict[int, str]] = None):
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_product_ranks: Optional[set] = None):
     """
     Create a visualization showing the ranking order on the original image.
-    Highlights issues in red and adds a text label describing the issue.
+    Only highlights issues in red if issue_product_ranks is provided and is not empty.
     Correct products will not have any boxes drawn on them.
-
-    Args:
-        pil_img (Image.Image): The original page image.
-        boxes (List[Dict]): The list of all detected product boxes on the page.
-        output_path (str): The path to save the output image.
-        issue_details (Optional[Dict[int, str]]): A dictionary mapping the rank of an item
-                                                   to the type of issue (e.g., {5: "Price", 7: "Brand"}).
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
@@ -316,25 +309,28 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             font = ImageFont.load_default()
             logger.warning("Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
 
+    # default_box_color = "blue" # REMOVED - No default boxes for correct items
     issue_box_color = "red"
     font_color = "black"
-    font_background_color = "yellow"
+    font_background_color = "yellow" # For the rank number background
 
     if not boxes:
         logger.info(f"No boxes to visualize for {output_path}. Saving original image.")
-        img_copy.save(output_path, "JPEG", quality=85)
+        # EXISTING (or implied previous quality):
+        # img_copy.save(output_path, "JPEG", quality=95) 
+        # NEW (optimized for display):
+        img_copy.save(output_path, "JPEG", quality=85) 
         return
 
-    if issue_details is None:
-        issue_details = {}
+    if issue_product_ranks is None: # Ensure issue_product_ranks is a set for efficient lookup
+        issue_product_ranks = set()
 
-    for idx, box_data in enumerate(boxes):
-        current_rank = idx + 1  # Rank is 1-based
+    for idx, box_data in enumerate(boxes): # Renamed 'box' to 'box_data' for clarity
+        current_rank = idx + 1  # Rank is 1-based from the list order
 
-        # --- MODIFIED LOGIC: Check for issue and get its label ---
-        if current_rank in issue_details:
-            issue_label = issue_details.get(current_rank, "Issue") # Get the issue type
-            box_outline_color_to_use = issue_box_color
+        # --- NEW LOGIC: Only draw if it's an issue ---
+        if current_rank in issue_product_ranks:
+            box_outline_color_to_use = issue_box_color # It's an issue, use red
 
             left = int(box_data.get("left", 0))
             top = int(box_data.get("top", 0))
@@ -343,30 +339,30 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
 
             draw.rectangle([left, top, right, bottom], outline=box_outline_color_to_use, width=4)
 
-            # --- NEW: Combine rank and issue label for display ---
-            rank_text = f"{current_rank} - {issue_label}"
-
+            rank_text = str(current_rank)
+            # Use textbbox for modern PIL to get accurate text size
             try:
                 text_bbox = draw.textbbox((0, 0), rank_text, font=font)
                 text_width = text_bbox[2] - text_bbox[0]
                 text_height = text_bbox[3] - text_bbox[1]
             except AttributeError: # Fallback for older Pillow versions
                 text_width, text_height = draw.textsize(rank_text, font=font)
-
-            text_x = left + 5  # Position text inside the box
+            
+            text_x = left + 5  # Position rank number inside the box
             text_y = top + 5
 
-            # Draw background for the text for better visibility
+            # Draw background for the rank number for better visibility
             draw.rectangle(
                 [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
                 fill=font_background_color,
-                outline="black",
+                outline="black", 
                 width=1
             )
             draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
 
     img_copy.save(output_path, "JPEG", quality=85)
-    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_details)})")
+    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks and len(issue_product_ranks) > 0)})")
+    # print(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks)})")
 
 # In SCRIPT 1
 
@@ -1125,7 +1121,7 @@ class PracticalCatalogComparator:
         return image_files
 
     def extract_product_data_with_vlm(self, image_path: str, image_rank: int,
-                                      catalog_name: str) -> Dict:
+                                     catalog_name: str) -> Dict:
         """Extract focused product data - only what matters for comparison"""
         item_id_for_log = f"{catalog_name}-Rank{image_rank}"
 
@@ -1133,7 +1129,7 @@ class PracticalCatalogComparator:
             with open(image_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
-            # --- MODIFIED PROMPT: More resilient to missing/unclear prices ---
+            # Focused VLM prompt - only extract what we need for comparison
             system_prompt = """You are a product information extraction expert for retail catalog comparison.
             Focus ONLY on extracting the essential information needed for accurate product matching.
 
@@ -1141,36 +1137,41 @@ class PracticalCatalogComparator:
 
             1. PRICES (CRITICAL):
                - Strictly Extract the Main offer price (large, prominent price - usually placed top-right)
-               - Strictly Extract Regular price (which will be given below the product with the description)
+               - Strictly Extract Regular price  (which will be given below the product with the description)
                - Format handling: "8 87" → 8.87, "887" → 8.87, "1097" → 10.97
-               - If a price is genuinely not present or unreadable, return null for that field. DO NOT GUESS.
+               - Unit indicators: "c/u", "ea.", "each"
 
             2. BRAND IDENTIFICATION (CRITICAL):
-               - Brand name from packaging, logos, or text.
-               - Extract the FULL brand variant shown (e.g., "Suavitel Complete", "Bounty Essentials", "Ace Simply").
-               - Focus on the main brand, not minor descriptors.
+               - Brand name from packaging, logos, or text
+               - Extract exactly as shown, including variants like for e.g "Ace Simply"
+               - Focus on the main brand, not minor descriptors
 
             3. PRODUCT BASICS:
                - Core product name/type (detergent, cleaner, etc.)
                - Size/quantity if clearly visible
-               - Only extract what's clearly readable - don't guess.
+               - Only extract what's clearly readable - don't guess
 
             4. IGNORE MINOR DETAILS:
-               - Don't worry about exact wording of descriptions, word order, or marketing language.
+               - Don't worry about exact wording of descriptions
+               - Skip fine print unless it's price-related
+               - Focus on core product identity, not marketing language
 
+            COMPARISON FOCUS:
             The goal is to compare if these are the SAME PRODUCT at the SAME PRICE.
-            What matters: Full Brand match + Price match + Basic product type match.
+            Minor text differences, word order, or description variations don't matter.
+            What matters: Brand match + Price match + Basic product type match.
 
             Return JSON with these fields:
-            - "offer_price": Main price (decimal or null if not found)
-            - "regular_price": Regular price if shown (decimal or null if not found)
-            - "product_brand": Primary brand name including variants.
+            - "offer_price": Main price (decimal or null)
+            - "regular_price": Regular price if shown (decimal or null)
+            - "product_brand": Primary brand name
             - "product_type": Basic product type (detergent, cleaner, etc.)
-            - "size_quantity": Size if clearly visible.
+            - "size_quantity": Size if clearly visible
             - "product_status": "Product Present" or "Product Missing"
             - "confidence_score": How confident you are in the extraction (1-10)
 
-            Be precise with prices and full brand names. Be flexible with everything else. Do not generate information on your own."""
+            Be precise with prices and brands which are present. Extract as it is. Be flexible with everything else. Strictly do not generate any information on your own"""
+
             messages = [
                 {
                     "role": "user",
@@ -1311,36 +1312,43 @@ class PracticalCatalogComparator:
         return product_data
 
     def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
-            """Check if two brands represent the same product using a stricter fuzzy matching"""
-            if not brand1 or not brand2:
-                return False, 0
+        """Check if two brands represent the same product using fuzzy matching"""
+        if not brand1 or not brand2:
+            return False, 0
 
-            # Normalize brands for comparison
-            b1 = str(brand1).lower().strip()
-            b2 = str(brand2).lower().strip()
+        # Normalize brands for comparison
+        b1 = str(brand1).lower().strip()
+        b2 = str(brand2).lower().strip()
 
-            # Exact match
-            if b1 == b2:
-                return True, 100.0
+        # Exact match
+        if b1 == b2:
+            return True, 100
 
-            # --- MODIFIED: Stricter brand matching logic ---
-            # Remove partial_ratio which is too lenient for variants like "Essentials"
-            # Use a higher threshold to avoid incorrect matches.
-            score = fuzz.ratio(b1, b2)
-            
-            # We can also check token_sort_ratio for cases where word order differs but brands are the same
-            # e.g. "Clean Oxi" vs "Oxi Clean"
-            sort_score = fuzz.token_sort_ratio(b1, b2)
+        # Remove common words that don't affect product identity
+        common_words = ['simply', 'ultra', 'advanced', 'new', 'improved', 'original', 'classic']
 
-            # Take the higher of the two relevant scores
-            final_score = max(score, sort_score)
+        def clean_brand(brand):
+            words = brand.split()
+            return ' '.join([w for w in words if w not in common_words])
 
-            # Threshold increased from 80 to 90 to make it stricter
-            is_same = final_score >= 90
+        b1_clean = clean_brand(b1)
+        b2_clean = clean_brand(b2)
 
-            logger.debug(f"Brand comparison: '{brand1}' vs '{brand2}' -> Score: {final_score:.1f}% (Threshold: 90%) -> Same: {is_same}")
+        # Check if core brand names match
+        scores = [
+            fuzz.ratio(b1_clean, b2_clean),
+            fuzz.partial_ratio(b1_clean, b2_clean),
+            fuzz.token_sort_ratio(b1_clean, b2_clean)
+        ]
 
-            return is_same, final_score
+        max_score = max(scores)
+
+        # More lenient threshold - 80% similarity means same product
+        is_same = max_score >= 80
+
+        logger.debug(f"Brand comparison: '{brand1}' vs '{brand2}' -> {max_score}% (Same: {is_same})")
+
+        return is_same, max_score
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
                                    catalog1_name: str = None, catalog2_name: str = None) -> Dict:
@@ -1538,9 +1546,6 @@ class PracticalCatalogComparator:
         p1_display = self.format_product_display(product1)
         p2_display = self.format_product_display(product2)
 
-        p1_rank = product1.get('rank') if product1 else None
-        p2_rank = product2.get('rank') if product2 else None
-
         return {
             f"{catalog1_name}_details": p1_display,
             f"{catalog2_name}_details": p2_display,
@@ -1549,10 +1554,7 @@ class PracticalCatalogComparator:
             "details": "; ".join(issues) if issues else "Products match",
             "price_match": "YES" if not price_issue else "NO",
             "brand_match": "YES" if brand_match else f"NO ({brand_score:.1f}%)",
-            "brand_similarity": f"{brand_score:.1f}%",
-            # --- NEW: Add original ranks to the output row ---
-            "catalog1_rank": p1_rank,
-            "catalog2_rank": p2_rank
+            "brand_similarity": f"{brand_score:.1f}%"
         }
 
     def format_product_display(self, product: Dict) -> str:
@@ -1904,16 +1906,7 @@ def catalog_comparison_pipeline(
 
         if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"]:
             vlm_all_pages_data = pipeline_results["step3_vlm_comparison"]
-            logger.info("Updating visualizations with VLM comparison results and issue labels...")
-
-            # --- NEW: Define a mapping for concise issue labels ---
-            issue_label_map = {
-                "Missing Product": "Missing",
-                "Different Product": "Brand",
-                "Price Difference": "Price",
-                "Multiple Issues": "Issue"
-            }
-
+            logger.info("Updating visualizations with VLM comparison results...")
 
             # Iterate through each page's VLM results
             for page_id_key, page_vlm_data in vlm_all_pages_data.items(): # e.g., page_id_key = "page_1"
@@ -1931,37 +1924,46 @@ def catalog_comparison_pipeline(
                 comparison_rows = vlm_results_for_page.get("comparison_rows", [])
                 
                 # Determine issue ranks for catalog 1 and catalog 2 for the current page
-                issue_details_cat1 = {}
-                issue_details_cat2 = {}
+                issue_ranks_cat1 = set()
+                issue_ranks_cat2 = set()
 
-                for row_data in comparison_rows:
+                # The comparison_rows are generated by iterating ranks from 1 to max_rank.
+                # So, the index of the row + 1 gives the rank on the page.
+                for rank_idx, row_data in enumerate(comparison_rows):
+                    current_rank_on_page = rank_idx + 1 
+                    
                     comparison_status = row_data.get("comparison_result", "")
-                    if comparison_status.startswith("INCORRECT"):
-                        issue_type = row_data.get("issue_type", "")
-                        details = row_data.get("details", "")
-                        
-                        # Get the actual ranks from the row data
-                        c1_rank = row_data.get("catalog1_rank")
-                        c2_rank = row_data.get("catalog2_rank")
-                        
-                        issue_label = issue_label_map.get(issue_type, "Issue")
-                        
-                        vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1")
-                        vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
+                    issue_type = row_data.get("issue_type", "")
+                    details = row_data.get("details", "")
+                    
+                    # Catalog names as used in VLM results (e.g., "Catalog1_Page1")
+                    vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1") 
+                    vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
 
+                    # Check if product from catalog 1 was part of this row's comparison
+                    # (i.e., not reported as "Product Missing" for catalog 1 in this specific row)
+                    product1_in_row_details = row_data.get(f"{vlm_cat1_name}_details", "")
+                    is_product1_present_in_row = not ("Product Missing" in product1_in_row_details if isinstance(product1_in_row_details, str) else True)
+
+                    product2_in_row_details = row_data.get(f"{vlm_cat2_name}_details", "")
+                    is_product2_present_in_row = not ("Product Missing" in product2_in_row_details if isinstance(product2_in_row_details, str) else True)
+
+                    if comparison_status.startswith("INCORRECT"):
+                        # --- START: CORRECTED LOGIC ---
                         if issue_type == "Missing Product":
-                            # If a product is missing, only one of the ranks will exist
-                            if c1_rank and "missing in " + vlm_cat2_name in details:
-                                issue_details_cat1[c1_rank] = "Not Found"
-                            elif c2_rank and "missing in " + vlm_cat1_name in details:
-                                issue_details_cat2[c2_rank] = "Not Found"
+                            # Check if the error message says it's missing in Catalog 2
+                            if "missing in " + vlm_cat2_name in details:
+                                # If Cat 2 is missing, highlight the product that exists in Cat 1.
+                                issue_ranks_cat1.add(current_rank_on_page)
+                            # Check if the error message says it's missing in Catalog 1
+                            elif "missing in " + vlm_cat1_name in details:
+                                # If Cat 1 is missing, highlight the product that exists in Cat 2.
+                                issue_ranks_cat2.add(current_rank_on_page)
                         
+                        # This part was already correct. It handles issues where both products exist but are different.
                         elif issue_type in ["Different Product", "Price Difference", "Multiple Issues"]:
-                            # Both products exist but have issues. Both ranks will be present.
-                            if c1_rank:
-                                issue_details_cat1[c1_rank] = issue_label
-                            if c2_rank:
-                                issue_details_cat2[c2_rank] = issue_label
+                            issue_ranks_cat1.add(current_rank_on_page)
+                            issue_ranks_cat2.add(current_rank_on_page)
 
 
                 # Regenerate visualization for Catalog 1, Page `page_num`
@@ -1969,18 +1971,19 @@ def catalog_comparison_pipeline(
                     page_info_c1 = pdf_results["page_level_data_catalog1"][page_num]
                     pil_img_c1 = page_info_c1.get('image_pil')
                     ranked_boxes_c1 = page_info_c1.get('ranked_boxes')
-                    page_folder_c1 = Path(page_info_c1.get('page_folder_path'))
+                    # Path where cropped images (and thus visualizations) for this page are stored
+                    page_folder_c1 = Path(page_info_c1.get('page_folder_path')) 
                     
                     if pil_img_c1 and ranked_boxes_c1 and page_folder_c1.exists():
-                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg"
+                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
                         viz_output_path_c1 = page_folder_c1 / viz_filename_c1
                         create_ranking_visualization(
                             pil_img=pil_img_c1,
                             boxes=ranked_boxes_c1,
                             output_path=str(viz_output_path_c1),
-                            issue_details=issue_details_cat1 # Pass the detailed issue dictionary
+                            issue_product_ranks=issue_ranks_cat1 # Pass the identified issue ranks
                         )
-                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issue details: {issue_details_cat1}")
+                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
                     else:
                         logger.warning(f"Could not update viz for Cat1 Page {page_num}, missing PIL/boxes or folder path.")
 
@@ -1992,19 +1995,19 @@ def catalog_comparison_pipeline(
                     page_folder_c2 = Path(page_info_c2.get('page_folder_path'))
 
                     if pil_img_c2 and ranked_boxes_c2 and page_folder_c2.exists():
-                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg"
+                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
                         viz_output_path_c2 = page_folder_c2 / viz_filename_c2
                         create_ranking_visualization(
                             pil_img=pil_img_c2,
                             boxes=ranked_boxes_c2,
                             output_path=str(viz_output_path_c2),
-                            issue_details=issue_details_cat2 # Pass the detailed issue dictionary
+                            issue_product_ranks=issue_ranks_cat2 # Pass the identified issue ranks
                         )
-                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issue details: {issue_details_cat2}")
+                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
                     else:
                         logger.warning(f"Could not update viz for Cat2 Page {page_num}, missing PIL/boxes or folder path.")
         else:
-            logger.info("No VLM comparison results found. Visualizations will not be updated with VLM issues.")
+            logger.info("No VLM comparison results found or step3_vlm_comparison is empty. Visualizations will not be updated with VLM issues.")
 
         # ==============================
         # STEP 4: CONSOLIDATE RESULTS

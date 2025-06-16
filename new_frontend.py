@@ -119,14 +119,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 "highlighted_pages_file1": [], "highlighted_pages_file2": []
             }
 
-            # --- ADD THIS NEW BLOCK HERE ---
-            # This block populates the details for the frontend summary
-            if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"].get("page_1"):
-                # Assuming single-page comparison for now.
-                vlm_page_results = pipeline_results["step3_vlm_comparison"]["page_1"].get("results", {})
-                frontend_results_to_display["product_comparison_details"] = vlm_page_results.get("comparison_rows", [])
-            # --- END OF NEW BLOCK ---
-
             if pipeline_results.get("errors"):
                 frontend_results_to_display["error"] = "; ".join(map(str,pipeline_results["errors"]))
                 frontend_results_to_display["message"] = "Comparison completed with errors."
@@ -259,14 +251,6 @@ st.markdown("""
     div[data-testid="stAlert"][kind="success"] p {
         color: #000000 !important; /* Black text color */
     }
-    
-            /* Target Streamlit's metric components for better visibility */
-    div[data-testid="stMetric"] label {
-        color: #6b7280 !important; /* Sets the label (e.g., "Price Issues") to gray */
-    }
-    div[data-testid="stMetric"] div[data-testid="stMetricValue"] {
-        color: #141414 !important; /* Sets the value (e.g., "12") to black */
-    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -342,22 +326,12 @@ if 'comparison_results' in st.session_state:
         st.error(f"An error occurred during the comparison process: {results.get('error')}")
     else:
         # --- Summary Metrics ---
-        st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Error Summary</h2>", unsafe_allow_html=True)
-        
-        # Calculate totals from the results
-        all_diffs = [diff for row in results.get("product_comparison_details", []) for diff in row.get("granular_differences", [])]
-        price_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Price')
-        text_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Text')
-        image_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Image')
-        total_mistakes = price_mistakes + text_mistakes + image_mistakes
-
-        sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
-        sum_col1.metric("Total Discrepancies", total_mistakes)
-        sum_col2.metric("Price Issues", price_mistakes)
-        sum_col3.metric("Text/Brand Issues", text_mistakes)
-        sum_col4.metric("Image Mismatches", image_mistakes)
-        
-        # --- End of new section ---
+        st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Comparison Summary</h2>", unsafe_allow_html=True)
+        col_m1, col_m2, col_m3 = st.columns(3)
+        col_m1.metric(label=f"Products in {st.session_state.get('file1_name', 'File 1')}", value=results.get("product_items_file1_count", "N/A"))
+        col_m2.metric(label=f"Products in {st.session_state.get('file2_name', 'File 2')}", value=results.get("product_items_file2_count", "N/A"))
+        num_issues = len(results.get("product_comparison_details", []))
+        col_m3.metric(label="Discrepancies Found", value=num_issues)
 
         # --- Visual Comparison Section (Full Pages) ---
         highlighted_pages_file1 = st.session_state.get('highlighted_pages_file1', [])
