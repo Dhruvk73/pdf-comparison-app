@@ -2329,8 +2329,7 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
         logger.error(f"Error in practical comparison: {e}")
         raise
 
-print("\nEXPORT RESULT VERIFICATION:")
-print(f"Export returned: {export_result}")   
+ 
 # ========================================
 # STREAMLINED CATALOG COMPARISON PIPELINE
 # ========================================
