@@ -388,36 +388,27 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                     # FIXED: Better coordinate handling
                     x1, y1, x2, y2 = [float(coord) for coord in diff_box_coords]
                     
-                    # FIXED: Check if coordinates are relative (0-1) or absolute
+                    # SIMPLIFIED: Always treat as product-relative coordinates for better accuracy
+                    product_width = product_box_coords[2] - product_box_coords[0]
+                    product_height = product_box_coords[3] - product_box_coords[1]
+                    
+                    # Check if coordinates are relative (0-1)
                     if all(0 <= coord <= 1 for coord in [x1, y1, x2, y2]):
                         # Relative coordinates - convert to absolute within the product box
-                        product_width = product_box_coords[2] - product_box_coords[0]
-                        product_height = product_box_coords[3] - product_box_coords[1]
-                        
                         abs_x1 = product_box_coords[0] + (x1 * product_width)
                         abs_y1 = product_box_coords[1] + (y1 * product_height)
                         abs_x2 = product_box_coords[0] + (x2 * product_width)
                         abs_y2 = product_box_coords[1] + (y2 * product_height)
-                        
                         abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
                         logger.info(f"Converted relative coords {diff_box_coords} to absolute {abs_box}")
                     else:
-                        # FIXED: For absolute coordinates, handle them more carefully
-                        product_width = product_box_coords[2] - product_box_coords[0]
-                        product_height = product_box_coords[3] - product_box_coords[1]
-                        
-                        # If coordinates seem to be within product bounds, treat as relative to product
-                        if x2 <= product_width and y2 <= product_height:
-                            abs_x1 = product_box_coords[0] + x1
-                            abs_y1 = product_box_coords[1] + y1
-                            abs_x2 = product_box_coords[0] + x2
-                            abs_y2 = product_box_coords[1] + y2
-                            abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
-                            logger.info(f"Treated as product-relative coords: {diff_box_coords} -> {abs_box}")
-                        else:
-                            # Use as absolute page coordinates
-                            abs_box = [x1, y1, x2, y2]
-                            logger.info(f"Using as absolute page coords: {abs_box}")
+                        # ALWAYS treat as product-relative coordinates for consistency
+                        abs_x1 = product_box_coords[0] + x1
+                        abs_y1 = product_box_coords[1] + y1
+                        abs_x2 = product_box_coords[0] + x2
+                        abs_y2 = product_box_coords[1] + y2
+                        abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
+                        logger.info(f"Treated as product-relative coords: {diff_box_coords} -> {abs_box}")
                     
                     # EXPANDED error box for better visibility
                     expansion = 25  # Increased expansion
@@ -459,40 +450,40 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                         if inner_box[2] > inner_box[0] and inner_box[3] > inner_box[1]:
                             draw.rectangle(inner_box, outline=(255, 0, 0), width=4)
                         
-                        # FIXED: Draw error type label with much better visibility
+                        # FIXED: Draw error type label with HIGH CONTRAST
                         label_text = diff_type
                         
                         # Position label ABOVE the error box for better visibility
                         label_x = abs_box[0]
-                        label_y = max(10, abs_box[1] - 80)  # Position above the box
+                        label_y = max(80, abs_box[1] - 100)  # More space above
                         
                         # FIXED: Calculate text size properly
                         try:
-                            # Try to get text bounding box
                             text_bbox = draw.textbbox((label_x, label_y), label_text, font=label_font)
                             text_width = text_bbox[2] - text_bbox[0]
                             text_height = text_bbox[3] - text_bbox[1]
                         except:
                             # Fallback text size estimation
-                            text_width = len(label_text) * 30  # Rough estimation
-                            text_height = 50
+                            text_width = len(label_text) * 35  # Bigger estimation
+                            text_height = 60
                         
                         # Ensure label fits within image bounds
                         if label_x + text_width > img_copy.width:
-                            label_x = max(0, img_copy.width - text_width - 10)
+                            label_x = max(0, img_copy.width - text_width - 20)
                         
-                        # Draw larger text background for better readability
+                        # BRIGHT YELLOW background for maximum contrast
                         bg_box = [
-                            label_x - 10, 
-                            label_y - 10, 
-                            label_x + text_width + 20, 
-                            label_y + text_height + 10
+                            label_x - 15, 
+                            label_y - 15, 
+                            label_x + text_width + 30, 
+                            label_y + text_height + 15
                         ]
-                        draw.rectangle(bg_box, fill=text_bg_color)
+                        # Use bright yellow background instead of black
+                        draw.rectangle(bg_box, fill=(255, 255, 0, 240))  # Bright yellow
                         
-                        # Draw the text with thick stroke and larger size
-                        draw.text((label_x, label_y), label_text, fill=text_color, font=label_font, 
-                                 stroke_width=4, stroke_fill=text_stroke_color)
+                        # BLACK text on yellow background for maximum readability
+                        draw.text((label_x, label_y), label_text, fill=(0, 0, 0), font=label_font, 
+                                 stroke_width=2, stroke_fill=(255, 255, 255))  # White stroke around black text
                         
                         final_width = abs_box[2] - abs_box[0]
                         final_height = abs_box[3] - abs_box[1]
@@ -1772,63 +1763,63 @@ class PracticalCatalogComparator:
         correct_matches = 0
         incorrect_matches = 0
         missing_products = 0
-        
-        # Count issue types
         price_issues = 0
         text_issues = 0
         image_issues = 0
         
-        # Process each comparison row
+        # Process each comparison row (your existing logic)
         for row in comparison_rows:
             comparison_result_status = row.get("comparison_result", "")
             issue_type = row.get("issue_type", "")
             details = row.get("details", "")
             granular_differences = row.get("granular_differences", [])
             
-            # Count by result status
             if comparison_result_status == "CORRECT":
                 correct_matches += 1
             elif comparison_result_status == "INCORRECT":
                 incorrect_matches += 1
                 
-                # FIXED: Check for missing products first
+                # Check for missing products
                 if "Missing Product" in issue_type or "missing" in details.lower():
                     missing_products += 1
-                    logger.debug(f"Found missing product: {issue_type} - {details}")
                 
-                # Count specific issue types from granular differences
+                # Count issue types from granular differences
                 if granular_differences:
                     for diff in granular_differences:
                         diff_type = diff.get("type", "").lower()
                         if "price" in diff_type:
                             price_issues += 1
-                            logger.debug(f"Found price issue: {diff_type}")
                         elif "text" in diff_type:
                             text_issues += 1
-                            logger.debug(f"Found text issue: {diff_type}")
                         elif "image" in diff_type:
                             image_issues += 1
-                            logger.debug(f"Found image issue: {diff_type}")
                 else:
-                    # FIXED: Better fallback logic for issue_type field
-                    # Only count if it's not already counted as missing product
+                    # Fallback to issue_type field
                     if "Missing Product" not in issue_type:
                         issue_type_lower = issue_type.lower()
-                        
-                        # Handle multiple issues in one field (e.g., "Price Error, Text Error")
                         if "price" in issue_type_lower:
                             price_issues += 1
-                            logger.debug(f"Found price issue from issue_type: {issue_type}")
                         if "text" in issue_type_lower:
                             text_issues += 1
-                            logger.debug(f"Found text issue from issue_type: {issue_type}")
                         if "image" in issue_type_lower:
                             image_issues += 1
-                            logger.debug(f"Found image issue from issue_type: {issue_type}")
 
-        # Calculate match rate
+        # Calculate rates
         match_rate = (correct_matches / max(total_rows, 1)) * 100
         error_rate = (incorrect_matches / max(total_rows, 1)) * 100
+
+        # FORCE PRINT THE CORRECT VALUES - THIS WILL SHOW IN YOUR FRONTEND
+        print(f"\n🔍 SUMMARY VERIFICATION - THESE VALUES SHOULD APPEAR:")
+        print(f"📊 Total comparisons: {total_rows}")
+        print(f"✅ Correct matches: {correct_matches}")
+        print(f"❌ Incorrect matches: {incorrect_matches}")
+        print(f"💰 Price issues: {price_issues}")
+        print(f"📝 Text issues: {text_issues}")
+        print(f"🖼️ Image issues: {image_issues}")
+        print(f"❓ Missing products: {missing_products}")
+        print(f"📈 Match rate: {match_rate:.1f}%")
+        print(f"📉 Error rate: {error_rate:.1f}%")
+    
 
         # FIXED SUMMARY DATA with correct calculations
         summary_data = {
@@ -2254,12 +2245,12 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
         )
 
         # ADD THIS DEBUG SECTION BEFORE EXPORT:
-        print("\n" + "="*60)
-        print("PRE-EXPORT DEBUGGING")
-        print("="*60)
+        print("\n" + "="*80)
+        print("🔍 PRE-EXPORT DEBUGGING - DETAILED ANALYSIS")
+        print("="*80)
         
         comparison_rows = results.get("comparison_rows", [])
-        print(f"Total comparison rows: {len(comparison_rows)}")
+        print(f"📋 Total comparison rows: {len(comparison_rows)}")
         
         # Count manually to verify
         manual_correct = 0
@@ -2268,6 +2259,7 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
         manual_text = 0
         manual_missing = 0
         
+        print(f"\n📊 ANALYZING EACH ROW:")
         for i, row in enumerate(comparison_rows, 1):
             result = row.get("comparison_result", "UNKNOWN")
             issue_type = row.get("issue_type", "")
@@ -2282,32 +2274,37 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
                 # Check for missing products
                 if "Missing Product" in issue_type or "missing" in details.lower():
                     manual_missing += 1
-                    print(f"Row {i}: MISSING PRODUCT - {issue_type}")
+                    print(f"   Row {i}: ❓ MISSING PRODUCT - {issue_type}")
                 else:
-                    print(f"Row {i}: {result} - {issue_type} - {len(granular_diffs)} granular diffs")
+                    print(f"   Row {i}: ❌ {result} - {issue_type} - {len(granular_diffs)} granular diffs")
                     
                     # Count issue types
                     if granular_diffs:
-                        for diff in granular_diffs:
+                        for j, diff in enumerate(granular_diffs, 1):
                             diff_type = diff.get("type", "").lower()
-                            print(f"  -> Diff type: '{diff_type}'")
+                            print(f"      Diff {j}: '{diff_type}'")
                             if "price" in diff_type:
                                 manual_price += 1
+                                print(f"        💰 PRICE ISSUE counted")
                             elif "text" in diff_type:
                                 manual_text += 1
+                                print(f"        📝 TEXT ISSUE counted")
                     else:
                         # Fallback to issue_type
                         if "price" in issue_type.lower():
                             manual_price += 1
+                            print(f"        💰 PRICE ISSUE counted from issue_type")
                         if "text" in issue_type.lower():
                             manual_text += 1
+                            print(f"        📝 TEXT ISSUE counted from issue_type")
         
-        print(f"\nMANUAL COUNT VERIFICATION:")
-        print(f"Correct: {manual_correct}")
-        print(f"Incorrect: {manual_incorrect}")
-        print(f"Price Issues: {manual_price}")
-        print(f"Text Issues: {manual_text}")
-        print(f"Missing Products: {manual_missing}")
+        print(f"\n" + "="*60)
+        print("🎯 MANUAL COUNT VERIFICATION (These should appear in frontend):")
+        print(f"✅ Correct: {manual_correct}")
+        print(f"❌ Incorrect: {manual_incorrect}")
+        print(f"💰 Price Issues: {manual_price}")
+        print(f"📝 Text Issues: {manual_text}")
+        print(f"❓ Missing Products: {manual_missing}")
         print("="*60)
 
         # Export results (this should now show the correct counts)
@@ -2323,6 +2320,8 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
         logger.error(f"Error in practical comparison: {e}")
         raise
 
+print("\nEXPORT RESULT VERIFICATION:")
+print(f"Export returned: {export_result}")   
 # ========================================
 # STREAMLINED CATALOG COMPARISON PIPELINE
 # ========================================
