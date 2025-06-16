@@ -1125,7 +1125,7 @@ class PracticalCatalogComparator:
         return image_files
 
     def extract_product_data_with_vlm(self, image_path: str, image_rank: int,
-                                     catalog_name: str) -> Dict:
+                                      catalog_name: str) -> Dict:
         """Extract focused product data - only what matters for comparison"""
         item_id_for_log = f"{catalog_name}-Rank{image_rank}"
 
@@ -1133,7 +1133,7 @@ class PracticalCatalogComparator:
             with open(image_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
-            # Focused VLM prompt - only extract what we need for comparison
+            # --- MODIFIED PROMPT: More resilient to missing/unclear prices ---
             system_prompt = """You are a product information extraction expert for retail catalog comparison.
             Focus ONLY on extracting the essential information needed for accurate product matching.
 
@@ -1141,41 +1141,36 @@ class PracticalCatalogComparator:
 
             1. PRICES (CRITICAL):
                - Strictly Extract the Main offer price (large, prominent price - usually placed top-right)
-               - Strictly Extract Regular price  (which will be given below the product with the description)
+               - Strictly Extract Regular price (which will be given below the product with the description)
                - Format handling: "8 87" → 8.87, "887" → 8.87, "1097" → 10.97
-               - Unit indicators: "c/u", "ea.", "each"
+               - If a price is genuinely not present or unreadable, return null for that field. DO NOT GUESS.
 
             2. BRAND IDENTIFICATION (CRITICAL):
-               - Brand name from packaging, logos, or text
-               - Extract exactly as shown, including variants like for e.g "Ace Simply"
-               - Focus on the main brand, not minor descriptors
+               - Brand name from packaging, logos, or text.
+               - Extract the FULL brand variant shown (e.g., "Suavitel Complete", "Bounty Essentials", "Ace Simply").
+               - Focus on the main brand, not minor descriptors.
 
             3. PRODUCT BASICS:
                - Core product name/type (detergent, cleaner, etc.)
                - Size/quantity if clearly visible
-               - Only extract what's clearly readable - don't guess
+               - Only extract what's clearly readable - don't guess.
 
             4. IGNORE MINOR DETAILS:
-               - Don't worry about exact wording of descriptions
-               - Skip fine print unless it's price-related
-               - Focus on core product identity, not marketing language
+               - Don't worry about exact wording of descriptions, word order, or marketing language.
 
-            COMPARISON FOCUS:
             The goal is to compare if these are the SAME PRODUCT at the SAME PRICE.
-            Minor text differences, word order, or description variations don't matter.
-            What matters: Brand match + Price match + Basic product type match.
+            What matters: Full Brand match + Price match + Basic product type match.
 
             Return JSON with these fields:
-            - "offer_price": Main price (decimal or null)
-            - "regular_price": Regular price if shown (decimal or null)
-            - "product_brand": Primary brand name
+            - "offer_price": Main price (decimal or null if not found)
+            - "regular_price": Regular price if shown (decimal or null if not found)
+            - "product_brand": Primary brand name including variants.
             - "product_type": Basic product type (detergent, cleaner, etc.)
-            - "size_quantity": Size if clearly visible
+            - "size_quantity": Size if clearly visible.
             - "product_status": "Product Present" or "Product Missing"
             - "confidence_score": How confident you are in the extraction (1-10)
 
-            Be precise with prices and brands which are present. Extract as it is. Be flexible with everything else. Strictly do not generate any information on your own"""
-
+            Be precise with prices and full brand names. Be flexible with everything else. Do not generate information on your own."""
             messages = [
                 {
                     "role": "user",
@@ -1315,44 +1310,37 @@ class PracticalCatalogComparator:
 
         return product_data
 
-    def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
-        """Check if two brands represent the same product using fuzzy matching"""
-        if not brand1 or not brand2:
-            return False, 0
+        def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
+            """Check if two brands represent the same product using a stricter fuzzy matching"""
+            if not brand1 or not brand2:
+                return False, 0
 
-        # Normalize brands for comparison
-        b1 = str(brand1).lower().strip()
-        b2 = str(brand2).lower().strip()
+            # Normalize brands for comparison
+            b1 = str(brand1).lower().strip()
+            b2 = str(brand2).lower().strip()
 
-        # Exact match
-        if b1 == b2:
-            return True, 100
+            # Exact match
+            if b1 == b2:
+                return True, 100.0
 
-        # Remove common words that don't affect product identity
-        common_words = ['simply', 'ultra', 'advanced', 'new', 'improved', 'original', 'classic']
+            # --- MODIFIED: Stricter brand matching logic ---
+            # Remove partial_ratio which is too lenient for variants like "Essentials"
+            # Use a higher threshold to avoid incorrect matches.
+            score = fuzz.ratio(b1, b2)
+            
+            # We can also check token_sort_ratio for cases where word order differs but brands are the same
+            # e.g. "Clean Oxi" vs "Oxi Clean"
+            sort_score = fuzz.token_sort_ratio(b1, b2)
 
-        def clean_brand(brand):
-            words = brand.split()
-            return ' '.join([w for w in words if w not in common_words])
+            # Take the higher of the two relevant scores
+            final_score = max(score, sort_score)
 
-        b1_clean = clean_brand(b1)
-        b2_clean = clean_brand(b2)
+            # Threshold increased from 80 to 90 to make it stricter
+            is_same = final_score >= 90
 
-        # Check if core brand names match
-        scores = [
-            fuzz.ratio(b1_clean, b2_clean),
-            fuzz.partial_ratio(b1_clean, b2_clean),
-            fuzz.token_sort_ratio(b1_clean, b2_clean)
-        ]
+            logger.debug(f"Brand comparison: '{brand1}' vs '{brand2}' -> Score: {final_score:.1f}% (Threshold: 90%) -> Same: {is_same}")
 
-        max_score = max(scores)
-
-        # More lenient threshold - 80% similarity means same product
-        is_same = max_score >= 80
-
-        logger.debug(f"Brand comparison: '{brand1}' vs '{brand2}' -> {max_score}% (Same: {is_same})")
-
-        return is_same, max_score
+            return is_same, final_score
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
                                    catalog1_name: str = None, catalog2_name: str = None) -> Dict:
@@ -1550,6 +1538,9 @@ class PracticalCatalogComparator:
         p1_display = self.format_product_display(product1)
         p2_display = self.format_product_display(product2)
 
+        p1_rank = product1.get('rank') if product1 else None
+        p2_rank = product2.get('rank') if product2 else None
+
         return {
             f"{catalog1_name}_details": p1_display,
             f"{catalog2_name}_details": p2_display,
@@ -1558,7 +1549,10 @@ class PracticalCatalogComparator:
             "details": "; ".join(issues) if issues else "Products match",
             "price_match": "YES" if not price_issue else "NO",
             "brand_match": "YES" if brand_match else f"NO ({brand_score:.1f}%)",
-            "brand_similarity": f"{brand_score:.1f}%"
+            "brand_similarity": f"{brand_score:.1f}%",
+            # --- NEW: Add original ranks to the output row ---
+            "catalog1_rank": p1_rank,
+            "catalog2_rank": p2_rank
         }
 
     def format_product_display(self, product: Dict) -> str:
@@ -1940,32 +1934,34 @@ def catalog_comparison_pipeline(
                 issue_details_cat1 = {}
                 issue_details_cat2 = {}
 
-                for rank_idx, row_data in enumerate(comparison_rows):
-                    current_rank_on_page = rank_idx + 1
-
+                for row_data in comparison_rows:
                     comparison_status = row_data.get("comparison_result", "")
-                    issue_type = row_data.get("issue_type", "")
-                    details = row_data.get("details", "")
-                    
-                    # Get the concise label for the UI
-                    issue_label = issue_label_map.get(issue_type, "Issue")
-
-                    vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1")
-                    vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
-
                     if comparison_status.startswith("INCORRECT"):
+                        issue_type = row_data.get("issue_type", "")
+                        details = row_data.get("details", "")
+                        
+                        # Get the actual ranks from the row data
+                        c1_rank = row_data.get("catalog1_rank")
+                        c2_rank = row_data.get("catalog2_rank")
+                        
+                        issue_label = issue_label_map.get(issue_type, "Issue")
+                        
+                        vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1")
+                        vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
+
                         if issue_type == "Missing Product":
-                            if "missing in " + vlm_cat2_name in details:
-                                # Product exists in Cat 1, but missing in Cat 2. Label it in Cat 1.
-                                issue_details_cat1[current_rank_on_page] = "Not Found"
-                            elif "missing in " + vlm_cat1_name in details:
-                                # Product exists in Cat 2, but missing in Cat 1. Label it in Cat 2.
-                                issue_details_cat2[current_rank_on_page] = "Not Found"
+                            # If a product is missing, only one of the ranks will exist
+                            if c1_rank and "missing in " + vlm_cat2_name in details:
+                                issue_details_cat1[c1_rank] = "Not Found"
+                            elif c2_rank and "missing in " + vlm_cat1_name in details:
+                                issue_details_cat2[c2_rank] = "Not Found"
                         
                         elif issue_type in ["Different Product", "Price Difference", "Multiple Issues"]:
-                            # The issue applies to both products, so label both.
-                            issue_details_cat1[current_rank_on_page] = issue_label
-                            issue_details_cat2[current_rank_on_page] = issue_label
+                            # Both products exist but have issues. Both ranks will be present.
+                            if c1_rank:
+                                issue_details_cat1[c1_rank] = issue_label
+                            if c2_rank:
+                                issue_details_cat2[c2_rank] = issue_label
 
 
                 # Regenerate visualization for Catalog 1, Page `page_num`
