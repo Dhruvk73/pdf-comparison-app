@@ -1310,7 +1310,7 @@ class PracticalCatalogComparator:
 
         return product_data
 
-        def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
+    def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
             """Check if two brands represent the same product using a stricter fuzzy matching"""
             if not brand1 or not brand2:
                 return False, 0
