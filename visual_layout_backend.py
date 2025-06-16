@@ -2218,6 +2218,8 @@ class PracticalCatalogComparator:
         except (ValueError, TypeError):
             return False    
         
+# Add this to your main_vlm_comparison function RIGHT BEFORE the export call:
+
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                        catalog1_name: str = None, catalog2_name: str = None,
                        output_path: str = None, price_tolerance: float = 0.01):
@@ -2308,10 +2310,13 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
         print("="*60)
 
         # Export results (this should now show the correct counts)
-        export_result = comparator.export_practical_comparison(results, output_path)
-        
-        print(f"\nEXPORT RESULT VERIFICATION:")
-        print(f"Export returned: {export_result}")
+        try:
+            export_result = comparator.export_practical_comparison(results, output_path)
+            print(f"\n🎯 EXPORT RESULT VERIFICATION:")
+            print(f"Export returned: {export_result}")
+        except Exception as e:
+            print(f"\n❌ EXPORT ERROR: {e}")
+            export_result = None
 
         print(f"PRACTICAL RESULTS SAVED TO: {output_path}")
         return results
