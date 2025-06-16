@@ -2246,7 +2246,7 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
             catalog2_name
         )
 
-        # ADD THIS DEBUG SECTION BEFORE EXPORT:
+        # DEBUG SECTION BEFORE EXPORT:
         print("\n" + "="*80)
         print("🔍 PRE-EXPORT DEBUGGING - DETAILED ANALYSIS")
         print("="*80)
@@ -2309,16 +2309,20 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
         print(f"❓ Missing Products: {manual_missing}")
         print("="*60)
 
-        # Export results (this should now show the correct counts)
+        # Export results - NOW AFTER DEBUG
         try:
+            print(f"\n🔄 CALLING EXPORT FUNCTION...")
             export_result = comparator.export_practical_comparison(results, output_path)
             print(f"\n🎯 EXPORT RESULT VERIFICATION:")
-            print(f"Export returned: {export_result}")
+            print(f"Export function returned: {export_result}")
+            print(f"Expected values should match manual count above ⬆️")
         except Exception as e:
             print(f"\n❌ EXPORT ERROR: {e}")
+            import traceback
+            traceback.print_exc()
             export_result = None
 
-        print(f"PRACTICAL RESULTS SAVED TO: {output_path}")
+        print(f"\n✅ PRACTICAL RESULTS SAVED TO: {output_path}")
         return results
 
     except Exception as e:
