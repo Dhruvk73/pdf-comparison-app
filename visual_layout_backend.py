@@ -1426,8 +1426,8 @@ class PracticalCatalogComparator:
         return is_same, max_score
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
-                               catalog1_name: str = None, catalog2_name: str = None) -> Dict:
-        """Generate practical comparison focused on what matters"""
+                           catalog1_name: str = None, catalog2_name: str = None) -> Dict:
+        """Generate practical comparison focused on what matters with enhanced debugging"""
         if not catalog1_name:
             catalog1_name = Path(folder1_path).name
         if not catalog2_name:
@@ -1465,6 +1465,14 @@ class PracticalCatalogComparator:
             )
             if row:
                 comparison_rows.append(row)
+                
+                # Debug logging for each row
+                result_status = row.get("comparison_result", "UNKNOWN")
+                issue_type = row.get("issue_type", "N/A")
+                differences_count = len(row.get("granular_differences", []))
+                
+                if result_status == "INCORRECT":
+                    logger.info(f"Position {rank}: {result_status} - {issue_type} - {differences_count} differences")
 
         result = {
             "catalog1_name": catalog1_name,
@@ -1479,13 +1487,17 @@ class PracticalCatalogComparator:
             }
         }
 
+        # ADD DEBUG CALL HERE
+        debug_summary = self.debug_comparison_results(result)
+        
         logger.info(f"Position-based comparison complete. Generated {len(comparison_rows)} comparison rows.")
+        logger.info(f"Debug summary: {debug_summary['correct_count']} correct, {debug_summary['incorrect_count']} incorrect")
+        
         return result
 
-
     def create_practical_comparison_row(self, product1: Dict, product2: Dict, rank: int,
-                                 catalog1_name: str, catalog2_name: str) -> Dict:
-        """Create comparison row for position-based comparison"""
+                             catalog1_name: str, catalog2_name: str) -> Dict:
+        """Create comparison row for position-based comparison with CORRECTED status logic"""
 
         # Handle missing products at this position
         if not product1 and not product2:
@@ -1495,7 +1507,7 @@ class PracticalCatalogComparator:
             return {
                 f"{catalog1_name}_details": "MISSING PRODUCT",
                 f"{catalog2_name}_details": f"Position {rank} - Product Present",
-                "comparison_result": "INCORRECT - Missing Product",
+                "comparison_result": "INCORRECT",  # FIXED: Was missing
                 "issue_type": "Missing Product",
                 "details": f"Product missing in {catalog1_name} at position {rank}",
                 "granular_differences": []
@@ -1504,8 +1516,8 @@ class PracticalCatalogComparator:
         if not product2:
             return {
                 f"{catalog1_name}_details": f"Position {rank} - Product Present",
-                f"{catalog2_name}_details": "MISSING PRODUCT",
-                "comparison_result": "INCORRECT - Missing Product",
+                f"{catalog2_name}_details": "MISSING PRODUCT", 
+                "comparison_result": "INCORRECT",  # FIXED: Was missing
                 "issue_type": "Missing Product",
                 "details": f"Product missing in {catalog2_name} at position {rank}",
                 "granular_differences": []
@@ -1532,17 +1544,62 @@ class PracticalCatalogComparator:
                 "granular_differences": []
             }
         else:
-            # Differences found - categorize them
-            issue_types = sorted(list(set([d['type'] for d in differences])))
+            # FIXED: Differences found - categorize them properly
+            issue_types = []
+            detailed_descriptions = []
+            
+            for diff in differences:
+                diff_type = diff.get('type', 'Unknown Error')
+                diff_desc = diff.get('description', 'No description')
+                
+                issue_types.append(diff_type)
+                detailed_descriptions.append(f"{diff_type}: {diff_desc}")
+            
+            # Create combined issue type and details
+            combined_issue_type = ", ".join(sorted(list(set(issue_types))))
+            combined_details = "; ".join(detailed_descriptions)
             
             return {
                 f"{catalog1_name}_details": f"Position {rank} - Product Present",
                 f"{catalog2_name}_details": f"Position {rank} - Product Present",
-                "comparison_result": "INCORRECT",
-                "issue_type": ", ".join(issue_types),
-                "details": "; ".join([d['description'] for d in differences]),
-                "granular_differences": differences
+                "comparison_result": "INCORRECT",  # FIXED: Ensure this is set correctly
+                "issue_type": combined_issue_type,
+                "details": combined_details,
+                "granular_differences": differences  # FIXED: Store the full differences
             }
+
+    # Also add this debugging function to help track what's happening
+    def debug_comparison_results(self, comparison_result: Dict):
+        """Debug function to log what's in the comparison results"""
+        comparison_rows = comparison_result.get("comparison_rows", [])
+        
+        logger.info(f"=== COMPARISON RESULTS DEBUG ===")
+        logger.info(f"Total comparison rows: {len(comparison_rows)}")
+        
+        correct_count = 0
+        incorrect_count = 0
+        
+        for i, row in enumerate(comparison_rows):
+            result = row.get("comparison_result", "UNKNOWN")
+            issue_type = row.get("issue_type", "N/A")
+            differences = row.get("granular_differences", [])
+            
+            if result == "CORRECT":
+                correct_count += 1
+            elif result == "INCORRECT":
+                incorrect_count += 1
+                logger.info(f"  Row {i+1}: {result} - {issue_type} - {len(differences)} differences")
+            else:
+                logger.warning(f"  Row {i+1}: UNKNOWN STATUS '{result}' - {issue_type}")
+        
+        logger.info(f"Summary: {correct_count} CORRECT, {incorrect_count} INCORRECT")
+        logger.info(f"=== END DEBUG ===")
+        
+        return {
+            "correct_count": correct_count,
+            "incorrect_count": incorrect_count,
+            "total_count": len(comparison_rows)
+        }
 
     def format_product_display(self, product: Dict) -> str:
         """Format product for display with safe None handling"""
@@ -1562,7 +1619,7 @@ class PracticalCatalogComparator:
         return f"{brand} - {price_display} - {size}"
 
     def export_practical_comparison(self, comparison_result: Dict, output_path: str):
-        """Export practical comparison results"""
+        """Export practical comparison results with CORRECTED summary calculations"""
 
         # Create main comparison DataFrame
         df = pd.DataFrame(comparison_result["comparison_rows"])
@@ -1598,42 +1655,83 @@ class PracticalCatalogComparator:
         ]
         df.columns = new_column_names[:len(existing_columns)]
 
-        # Create practical summary
-        total_rows = len(comparison_result["comparison_rows"])
-        correct_matches = len([r for r in comparison_result["comparison_rows"] 
-                            if r.get("comparison_result", "").startswith("CORRECT")])
+        # CORRECTED SUMMARY CALCULATIONS
+        comparison_rows = comparison_result["comparison_rows"]
+        total_rows = len(comparison_rows)
         
-        # Count different issue types
-        price_issues = len([r for r in comparison_result["comparison_rows"] 
-                        if "Price" in r.get("issue_type", "")])
-        text_issues = len([r for r in comparison_result["comparison_rows"] 
-                        if "Text" in r.get("issue_type", "")])
-        image_issues = len([r for r in comparison_result["comparison_rows"] 
-                        if "Image" in r.get("issue_type", "")])
-        missing_products = len([r for r in comparison_result["comparison_rows"] 
-                            if r.get("issue_type") == "Missing Product"])
+        # Count different result types
+        correct_matches = 0
+        incorrect_matches = 0
+        missing_products = 0
+        
+        # Count issue types
+        price_issues = 0
+        text_issues = 0
+        image_issues = 0
+        
+        # Process each comparison row
+        for row in comparison_rows:
+            comparison_result_status = row.get("comparison_result", "")
+            issue_type = row.get("issue_type", "")
+            granular_differences = row.get("granular_differences", [])
+            
+            # Count by result status
+            if comparison_result_status == "CORRECT":
+                correct_matches += 1
+            elif comparison_result_status == "INCORRECT":
+                incorrect_matches += 1
+                
+                # Count specific issue types from granular differences
+                if granular_differences:
+                    for diff in granular_differences:
+                        diff_type = diff.get("type", "").lower()
+                        if "price" in diff_type:
+                            price_issues += 1
+                        elif "text" in diff_type:
+                            text_issues += 1
+                        elif "image" in diff_type:
+                            image_issues += 1
+                else:
+                    # Fallback to issue_type field if no granular differences
+                    if "price" in issue_type.lower():
+                        price_issues += 1
+                    elif "text" in issue_type.lower():
+                        text_issues += 1
+                    elif "image" in issue_type.lower():
+                        image_issues += 1
+                    elif "missing" in issue_type.lower():
+                        missing_products += 1
 
-        # FIXED SUMMARY DATA
+        # Calculate match rate
+        match_rate = (correct_matches / max(total_rows, 1)) * 100
+
+        # FIXED SUMMARY DATA with correct calculations
         summary_data = {
             "Metric": [
                 "Total Comparisons",
-                "Correct Matches",
-                "Price Issues",
-                "Text Issues", 
-                "Image Issues",
+                "Correct Matches", 
+                "Incorrect Matches",
+                "Products with Issues",
+                "Price Issues Found",
+                "Text Issues Found", 
+                "Image Issues Found",
                 "Missing Products",
                 "Match Rate (%)",
+                "Error Rate (%)",
                 "Comparison Type",
                 "Focus"
             ],
             "Value": [
                 total_rows,
                 correct_matches,
+                incorrect_matches,
+                incorrect_matches,  # Products with issues = incorrect matches
                 price_issues,
                 text_issues,
                 image_issues,
                 missing_products,
-                f"{(correct_matches/max(total_rows,1)*100):.1f}%",
+                f"{match_rate:.1f}%",
+                f"{((incorrect_matches/max(total_rows,1))*100):.1f}%",
                 comparison_result['comparison_criteria'].get('comparison_type', 'Position-based'),
                 comparison_result['comparison_criteria'].get('focus', 'Quality Control')
             ]
@@ -1647,14 +1745,37 @@ class PracticalCatalogComparator:
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
 
         logger.info(f"Position-based comparison exported to {output_path}")
+        
+        # CORRECTED CONSOLE OUTPUT
         print(f"\nPOSITION-BASED COMPARISON SUMMARY:")
         print(f"Total comparisons: {total_rows}")
         print(f"Correct matches: {correct_matches}")
-        print(f"Price issues: {price_issues}")
-        print(f"Text issues: {text_issues}")
-        print(f"Image issues: {image_issues}")
+        print(f"Incorrect matches: {incorrect_matches}")
+        print(f"Products with issues: {incorrect_matches}")
+        print(f"Price issues found: {price_issues}")
+        print(f"Text issues found: {text_issues}")
+        print(f"Image issues found: {image_issues}")
         print(f"Missing products: {missing_products}")
-        print(f"Match rate: {(correct_matches/max(total_rows,1)*100):.1f}%")
+        print(f"Match rate: {match_rate:.1f}%")
+        print(f"Error rate: {((incorrect_matches/max(total_rows,1))*100):.1f}%")
+        
+        # Debug logging to help track the calculations
+        logger.info(f"SUMMARY CALCULATION DEBUG:")
+        logger.info(f"  Total rows processed: {total_rows}")
+        logger.info(f"  Rows with CORRECT status: {correct_matches}")
+        logger.info(f"  Rows with INCORRECT status: {incorrect_matches}")
+        logger.info(f"  Individual issue counts - Price: {price_issues}, Text: {text_issues}, Image: {image_issues}")
+        
+        return {
+            "total_comparisons": total_rows,
+            "correct_matches": correct_matches,
+            "incorrect_matches": incorrect_matches,
+            "price_issues": price_issues,
+            "text_issues": text_issues,
+            "image_issues": image_issues,
+            "missing_products": missing_products,
+            "match_rate": match_rate
+        }
 
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
         """
