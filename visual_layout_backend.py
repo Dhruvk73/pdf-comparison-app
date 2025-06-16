@@ -294,14 +294,14 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
-    Creates a visualization with RED boxes for specific error areas and yellow outlines for products with issues.
+    Creates a visualization with PROMINENT red boxes for specific error areas and yellow outlines for products with issues.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy, "RGBA")
 
     try:
-        font = ImageFont.truetype("arial.ttf", 32)
-        label_font = ImageFont.truetype("arialbd.ttf", 28)
+        font = ImageFont.truetype("arial.ttf", 40)  # Increased size
+        label_font = ImageFont.truetype("arialbd.ttf", 36)  # Increased size
     except IOError:
         font = ImageFont.load_default()
         label_font = ImageFont.load_default()
@@ -310,8 +310,9 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
-    # Define colors
-    error_box_color = (255, 77, 77, 200)  # Red with transparency for specific errors
+    # Enhanced colors for better visibility
+    error_box_color = (255, 0, 0, 180)  # Bright red with less transparency
+    error_outline_color = (255, 255, 255)  # White outline for contrast
     product_outline_color = (255, 255, 0)  # Yellow for product outline
     text_color = (255, 255, 255)  # White text
     text_stroke_color = (0, 0, 0)  # Black stroke for text
@@ -330,8 +331,8 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             box_data = boxes[rank - 1]
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
             
-            # Draw yellow outline around entire product with issues
-            draw.rectangle(product_box_coords, outline=product_outline_color, width=4)
+            # Draw THICK yellow outline around entire product with issues
+            draw.rectangle(product_box_coords, outline=product_outline_color, width=6)  # Increased width
             logger.info(f"Drew yellow outline for rank {rank} at {product_box_coords}")
 
             # Process each specific difference within this product
@@ -356,7 +357,6 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                     x1, y1, x2, y2 = [float(coord) for coord in diff_box_coords]
                     
                     # Convert relative coordinates to absolute if needed
-                    # Check if coordinates seem to be relative (0-1 range) or absolute
                     if all(0 <= coord <= 1 for coord in [x1, y1, x2, y2]):
                         # Relative coordinates - convert to absolute within the product box
                         product_width = product_box_coords[2] - product_box_coords[0]
@@ -374,6 +374,28 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                         abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
                         logger.info(f"Applied offset to absolute coords: {diff_box_coords} -> {abs_box}")
                     
+                    # EXPAND the error box for better visibility
+                    expansion = 15  # pixels to expand in each direction
+                    abs_box[0] = max(0, abs_box[0] - expansion)  # left
+                    abs_box[1] = max(0, abs_box[1] - expansion)  # top
+                    abs_box[2] = min(img_copy.width, abs_box[2] + expansion)  # right
+                    abs_box[3] = min(img_copy.height, abs_box[3] + expansion)  # bottom
+                    
+                    # Ensure minimum box size for visibility
+                    min_width, min_height = 120, 60  # Increased minimum size
+                    current_width = abs_box[2] - abs_box[0]
+                    current_height = abs_box[3] - abs_box[1]
+                    
+                    if current_width < min_width:
+                        center_x = (abs_box[0] + abs_box[2]) / 2
+                        abs_box[0] = max(0, center_x - min_width/2)
+                        abs_box[2] = min(img_copy.width, abs_box[0] + min_width)
+                    
+                    if current_height < min_height:
+                        center_y = (abs_box[1] + abs_box[3]) / 2
+                        abs_box[1] = max(0, center_y - min_height/2)
+                        abs_box[3] = min(img_copy.height, abs_box[1] + min_height)
+                    
                     # Ensure coordinates are within image bounds
                     abs_box[0] = max(0, min(abs_box[0], img_copy.width))
                     abs_box[1] = max(0, min(abs_box[1], img_copy.height))
@@ -382,19 +404,37 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                     
                     # Only draw if the box has valid dimensions
                     if abs_box[2] > abs_box[0] and abs_box[3] > abs_box[1]:
-                        # Draw RED error box for specific error area
-                        draw.rectangle(abs_box, fill=error_box_color, outline=(255, 0, 0), width=2)
+                        # Draw PROMINENT red error box with thick outline
+                        draw.rectangle(abs_box, fill=error_box_color, outline=error_outline_color, width=5)
                         
-                        # Draw text label below the error box
-                        label_y = abs_box[3] + 5  # 5 pixels below the error box
+                        # Add a second inner outline for extra visibility
+                        inner_box = [abs_box[0]+3, abs_box[1]+3, abs_box[2]-3, abs_box[3]-3]
+                        if inner_box[2] > inner_box[0] and inner_box[3] > inner_box[1]:
+                            draw.rectangle(inner_box, outline=(255, 0, 0), width=3)
+                        
+                        # Draw error type label with enhanced visibility
+                        label_y = abs_box[3] + 10  # 10 pixels below the error box
                         label_x = abs_box[0]
                         
                         # Ensure label doesn't go off the image
-                        if label_y < img_copy.height - 30:  # Leave space for text
+                        if label_y < img_copy.height - 60:  # Leave space for text
+                            # Draw text background for better readability
+                            try:
+                                text_bbox = draw.textbbox((label_x, label_y), diff_type, font=label_font)
+                                bg_box = [text_bbox[0]-5, text_bbox[1]-3, text_bbox[2]+5, text_bbox[3]+3]
+                                draw.rectangle(bg_box, fill=(0, 0, 0, 200))  # Semi-transparent black background
+                            except:
+                                # Fallback if textbbox not available
+                                bg_box = [label_x-5, label_y-3, label_x+200, label_y+40]
+                                draw.rectangle(bg_box, fill=(0, 0, 0, 200))
+                            
+                            # Draw the text with thick stroke
                             draw.text((label_x, label_y), diff_type, fill=text_color, font=label_font, 
-                                     stroke_width=2, stroke_fill=text_stroke_color)
+                                     stroke_width=3, stroke_fill=text_stroke_color)
                         
-                        logger.info(f"Drew red error box for rank {rank}, type {diff_type} at {abs_box}")
+                        final_width = abs_box[2] - abs_box[0]
+                        final_height = abs_box[3] - abs_box[1]
+                        logger.info(f"Drew ENHANCED red error box for rank {rank}, type {diff_type} at {abs_box} (size: {final_width}x{final_height})")
                     else:
                         logger.warning(f"Invalid box dimensions after processing: {abs_box}")
                         
@@ -404,8 +444,8 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
         else:
             logger.warning(f"No box data found for rank {rank}")
 
-    img_copy.save(output_path, "JPEG", quality=90)
-    logger.info(f"Enhanced visualization saved to: {output_path}")
+    img_copy.save(output_path, "JPEG", quality=95)  # Higher quality
+    logger.info(f"Enhanced red error box visualization saved to: {output_path}")
     logger.info(f"Total products with issues highlighted: {len(issue_details_per_rank)}")
 
 def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
@@ -1659,7 +1699,7 @@ class PracticalCatalogComparator:
         comparison_rows = comparison_result["comparison_rows"]
         total_rows = len(comparison_rows)
         
-        # Count different result types
+        # Initialize counters
         correct_matches = 0
         incorrect_matches = 0
         missing_products = 0
@@ -1673,6 +1713,7 @@ class PracticalCatalogComparator:
         for row in comparison_rows:
             comparison_result_status = row.get("comparison_result", "")
             issue_type = row.get("issue_type", "")
+            details = row.get("details", "")
             granular_differences = row.get("granular_differences", [])
             
             # Count by result status
@@ -1681,29 +1722,44 @@ class PracticalCatalogComparator:
             elif comparison_result_status == "INCORRECT":
                 incorrect_matches += 1
                 
+                # FIXED: Check for missing products first
+                if "Missing Product" in issue_type or "missing" in details.lower():
+                    missing_products += 1
+                    logger.debug(f"Found missing product: {issue_type} - {details}")
+                
                 # Count specific issue types from granular differences
                 if granular_differences:
                     for diff in granular_differences:
                         diff_type = diff.get("type", "").lower()
                         if "price" in diff_type:
                             price_issues += 1
+                            logger.debug(f"Found price issue: {diff_type}")
                         elif "text" in diff_type:
                             text_issues += 1
+                            logger.debug(f"Found text issue: {diff_type}")
                         elif "image" in diff_type:
                             image_issues += 1
+                            logger.debug(f"Found image issue: {diff_type}")
                 else:
-                    # Fallback to issue_type field if no granular differences
-                    if "price" in issue_type.lower():
-                        price_issues += 1
-                    elif "text" in issue_type.lower():
-                        text_issues += 1
-                    elif "image" in issue_type.lower():
-                        image_issues += 1
-                    elif "missing" in issue_type.lower():
-                        missing_products += 1
+                    # FIXED: Better fallback logic for issue_type field
+                    # Only count if it's not already counted as missing product
+                    if "Missing Product" not in issue_type:
+                        issue_type_lower = issue_type.lower()
+                        
+                        # Handle multiple issues in one field (e.g., "Price Error, Text Error")
+                        if "price" in issue_type_lower:
+                            price_issues += 1
+                            logger.debug(f"Found price issue from issue_type: {issue_type}")
+                        if "text" in issue_type_lower:
+                            text_issues += 1
+                            logger.debug(f"Found text issue from issue_type: {issue_type}")
+                        if "image" in issue_type_lower:
+                            image_issues += 1
+                            logger.debug(f"Found image issue from issue_type: {issue_type}")
 
         # Calculate match rate
         match_rate = (correct_matches / max(total_rows, 1)) * 100
+        error_rate = (incorrect_matches / max(total_rows, 1)) * 100
 
         # FIXED SUMMARY DATA with correct calculations
         summary_data = {
@@ -1731,7 +1787,7 @@ class PracticalCatalogComparator:
                 image_issues,
                 missing_products,
                 f"{match_rate:.1f}%",
-                f"{((incorrect_matches/max(total_rows,1))*100):.1f}%",
+                f"{error_rate:.1f}%",
                 comparison_result['comparison_criteria'].get('comparison_type', 'Position-based'),
                 comparison_result['comparison_criteria'].get('focus', 'Quality Control')
             ]
@@ -1746,7 +1802,7 @@ class PracticalCatalogComparator:
 
         logger.info(f"Position-based comparison exported to {output_path}")
         
-        # CORRECTED CONSOLE OUTPUT
+        # ENHANCED CONSOLE OUTPUT WITH DEBUGGING
         print(f"\nPOSITION-BASED COMPARISON SUMMARY:")
         print(f"Total comparisons: {total_rows}")
         print(f"Correct matches: {correct_matches}")
@@ -1757,15 +1813,27 @@ class PracticalCatalogComparator:
         print(f"Image issues found: {image_issues}")
         print(f"Missing products: {missing_products}")
         print(f"Match rate: {match_rate:.1f}%")
-        print(f"Error rate: {((incorrect_matches/max(total_rows,1))*100):.1f}%")
+        print(f"Error rate: {error_rate:.1f}%")
         
-        # Debug logging to help track the calculations
-        logger.info(f"SUMMARY CALCULATION DEBUG:")
+        # ENHANCED DEBUG LOGGING
+        logger.info(f"DETAILED SUMMARY CALCULATION DEBUG:")
         logger.info(f"  Total rows processed: {total_rows}")
         logger.info(f"  Rows with CORRECT status: {correct_matches}")
         logger.info(f"  Rows with INCORRECT status: {incorrect_matches}")
         logger.info(f"  Individual issue counts - Price: {price_issues}, Text: {text_issues}, Image: {image_issues}")
+        logger.info(f"  Missing products: {missing_products}")
         
+        # Additional debugging: Show breakdown by row
+        for i, row in enumerate(comparison_rows):
+            result = row.get("comparison_result", "UNKNOWN")
+            if result == "INCORRECT":
+                issue_type = row.get("issue_type", "N/A")
+                granular_diffs = row.get("granular_differences", [])
+                logger.info(f"  Row {i+1}: {result} - {issue_type} - {len(granular_diffs)} granular differences")
+                for j, diff in enumerate(granular_diffs):
+                    diff_type = diff.get("type", "Unknown")
+                    logger.info(f"    Diff {j+1}: {diff_type}")
+            
         return {
             "total_comparisons": total_rows,
             "correct_matches": correct_matches,
@@ -1776,7 +1844,6 @@ class PracticalCatalogComparator:
             "missing_products": missing_products,
             "match_rate": match_rate
         }
-
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
         """
         Enhanced VLM function with better bounding box detection guidance
