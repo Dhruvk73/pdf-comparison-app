@@ -294,7 +294,7 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
-    Creates a visualization with RED boxes for all errors and clear text labels.
+    Creates a visualization with RED boxes for specific error areas and yellow outlines for products with issues.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy, "RGBA")
@@ -310,45 +310,147 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
-    # RED color for all error boxes
-    error_box_color = (255, 77, 77, 200)  # Red with transparency
+    # Define colors
+    error_box_color = (255, 77, 77, 200)  # Red with transparency for specific errors
+    product_outline_color = (255, 255, 0)  # Yellow for product outline
     text_color = (255, 255, 255)  # White text
+    text_stroke_color = (0, 0, 0)  # Black stroke for text
+
+    logger.info(f"Processing {len(issue_details_per_rank)} products with issues")
 
     # Process only the products that have reported issues
     for rank, differences in issue_details_per_rank.items():
         if not differences:  # Skip if no issues
             continue
 
+        logger.info(f"Processing rank {rank} with {len(differences)} differences")
+
         # Find the main bounding box for this rank
         if (rank - 1) < len(boxes):
             box_data = boxes[rank - 1]
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
             
-            # Optional: Draw yellow outline around entire product with issues
-            draw.rectangle(product_box_coords, outline="yellow", width=4)
+            # Draw yellow outline around entire product with issues
+            draw.rectangle(product_box_coords, outline=product_outline_color, width=4)
+            logger.info(f"Drew yellow outline for rank {rank} at {product_box_coords}")
 
-            for diff in differences:
-                diff_type = diff.get("type")
+            # Process each specific difference within this product
+            for diff_idx, diff in enumerate(differences):
+                diff_type = diff.get("type", "Unknown")
                 diff_box_coords = diff.get("box1")  # Use box1 for first catalog
                 
-                if not diff_type or not diff_box_coords:
+                logger.info(f"Processing difference {diff_idx} for rank {rank}: type={diff_type}, box={diff_box_coords}")
+                
+                if not diff_box_coords:
+                    logger.warning(f"No bounding box coordinates for rank {rank}, difference {diff_idx}")
                     continue
 
-                # Translate coordinates from cropped product to full page
-                offset_x, offset_y = product_box_coords[0], product_box_coords[1]
-                x1, y1, x2, y2 = diff_box_coords
-                abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
-                
-                # Draw RED error box
-                draw.rectangle(abs_box, fill=error_box_color)
+                # Validate bounding box format
+                if not isinstance(diff_box_coords, list) or len(diff_box_coords) != 4:
+                    logger.warning(f"Invalid bounding box format for rank {rank}: {diff_box_coords}")
+                    continue
 
-                # Draw text label below the box
-                label_y = abs_box[3] + 5  # 5 pixels below the error box
-                draw.text((abs_box[0], label_y), diff_type, fill=text_color, font=label_font, 
+                try:
+                    # Translate coordinates from cropped product to full page
+                    offset_x, offset_y = product_box_coords[0], product_box_coords[1]
+                    x1, y1, x2, y2 = [float(coord) for coord in diff_box_coords]
+                    
+                    # Convert relative coordinates to absolute if needed
+                    # Check if coordinates seem to be relative (0-1 range) or absolute
+                    if all(0 <= coord <= 1 for coord in [x1, y1, x2, y2]):
+                        # Relative coordinates - convert to absolute within the product box
+                        product_width = product_box_coords[2] - product_box_coords[0]
+                        product_height = product_box_coords[3] - product_box_coords[1]
+                        
+                        abs_x1 = product_box_coords[0] + (x1 * product_width)
+                        abs_y1 = product_box_coords[1] + (y1 * product_height)
+                        abs_x2 = product_box_coords[0] + (x2 * product_width)
+                        abs_y2 = product_box_coords[1] + (y2 * product_height)
+                        
+                        abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
+                        logger.info(f"Converted relative coords {diff_box_coords} to absolute {abs_box}")
+                    else:
+                        # Absolute coordinates - add offset
+                        abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
+                        logger.info(f"Applied offset to absolute coords: {diff_box_coords} -> {abs_box}")
+                    
+                    # Ensure coordinates are within image bounds
+                    abs_box[0] = max(0, min(abs_box[0], img_copy.width))
+                    abs_box[1] = max(0, min(abs_box[1], img_copy.height))
+                    abs_box[2] = max(abs_box[0], min(abs_box[2], img_copy.width))
+                    abs_box[3] = max(abs_box[1], min(abs_box[3], img_copy.height))
+                    
+                    # Only draw if the box has valid dimensions
+                    if abs_box[2] > abs_box[0] and abs_box[3] > abs_box[1]:
+                        # Draw RED error box for specific error area
+                        draw.rectangle(abs_box, fill=error_box_color, outline=(255, 0, 0), width=2)
+                        
+                        # Draw text label below the error box
+                        label_y = abs_box[3] + 5  # 5 pixels below the error box
+                        label_x = abs_box[0]
+                        
+                        # Ensure label doesn't go off the image
+                        if label_y < img_copy.height - 30:  # Leave space for text
+                            draw.text((label_x, label_y), diff_type, fill=text_color, font=label_font, 
+                                     stroke_width=2, stroke_fill=text_stroke_color)
+                        
+                        logger.info(f"Drew red error box for rank {rank}, type {diff_type} at {abs_box}")
+                    else:
+                        logger.warning(f"Invalid box dimensions after processing: {abs_box}")
+                        
+                except (ValueError, TypeError) as e:
+                    logger.error(f"Error processing coordinates for rank {rank}: {e}")
+                    continue
+        else:
+            logger.warning(f"No box data found for rank {rank}")
+
+    img_copy.save(output_path, "JPEG", quality=90)
+    logger.info(f"Enhanced visualization saved to: {output_path}")
+    logger.info(f"Total products with issues highlighted: {len(issue_details_per_rank)}")
+
+def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
+    """
+    Fallback visualization when no specific bounding boxes are available - highlights entire products
+    """
+    img_copy = pil_img.copy()
+    draw = ImageDraw.Draw(img_copy, "RGBA")
+
+    try:
+        font = ImageFont.truetype("arial.ttf", 32)
+        label_font = ImageFont.truetype("arialbd.ttf", 28)
+    except IOError:
+        font = ImageFont.load_default()
+        label_font = ImageFont.load_default()
+
+    if issue_details_per_rank is None:
+        issue_details_per_rank = {}
+
+    # Yellow highlighting for products with issues
+    product_highlight_color = (255, 255, 0, 100)  # Yellow with transparency
+    text_color = (255, 255, 255)
+
+    for rank, differences in issue_details_per_rank.items():
+        if not differences:
+            continue
+
+        if (rank - 1) < len(boxes):
+            box_data = boxes[rank - 1]
+            product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
+            
+            # Highlight entire product in yellow
+            draw.rectangle(product_box_coords, fill=product_highlight_color, outline="yellow", width=3)
+            
+            # Add issue count label
+            issue_types = [d.get("type", "Unknown") for d in differences]
+            label_text = f"Issues: {len(differences)}"
+            
+            label_y = product_box_coords[1] - 25
+            if label_y > 0:
+                draw.text((product_box_coords[0], label_y), label_text, fill=text_color, font=label_font, 
                          stroke_width=2, stroke_fill="black")
 
     img_copy.save(output_path, "JPEG", quality=90)
-    logger.info(f"Red error box visualization saved to: {output_path}")
+    logger.info(f"Fallback visualization saved to: {output_path}")
 
 def validate_same_product(self, product1_path: str, product2_path: str) -> bool:
     """Optional: Quick brand validation to ensure we're comparing same products"""
@@ -1555,11 +1657,14 @@ class PracticalCatalogComparator:
         print(f"Match rate: {(correct_matches/max(total_rows,1)*100):.1f}%")
 
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
-    
+        """
+        Enhanced VLM function that detects differences AND provides bounding box coordinates
+        """
+        
         system_prompt = """
-        You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS.
+        You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS with precise locations.
 
-        Your task: Compare these products and identify obvious quality control issues.
+        Your task: Compare these products and identify obvious quality control issues, providing exact locations for each error.
 
         Look for these types of errors:
 
@@ -1567,20 +1672,18 @@ class PracticalCatalogComparator:
         - Same/similar products with significantly different prices (>$3 difference)
         - Obvious price typos (like $199.99 vs $19.99)
         - Missing prices or price formatting errors
+        - $0.00 prices (likely incorrect)
 
         2. **Text Errors**:
         - Clear spelling mistakes or typos in product names
-        - Missing or garbled text
+        - Missing or garbled text (like "Variedad 57 tandas 60 tandas")
         - Wrong product descriptions that don't match the image
+        - Capitalization errors (like "clorox" vs "Clorox")
 
         3. **Image Errors**:
-        - Obviously wrong product photos (detergent showing a car)
+        - Obviously wrong product photos
         - Corrupted, missing, or broken images
         - Misaligned or overlapping elements
-
-        4. **Layout Errors**:
-        - Text cut off or overlapping images
-        - Missing important information like sizes or brands
 
         IGNORE these normal variations:
         - Different brands in the same position (Tide vs Gain is normal)
@@ -1589,10 +1692,31 @@ class PracticalCatalogComparator:
         - Different promotional banners or seasonal decorations
         - Minor lighting or color variations
 
-        IMPORTANT: Return your response in this EXACT JSON format:
-        {"differences": [{"type": "Price Error", "description": "Price difference details"}, {"type": "Text Error", "description": "Text issue details"}]}
+        CRITICAL: For each error found, you MUST provide bounding box coordinates [x1, y1, x2, y2] for the specific error area in BOTH images.
+
+        Return your response in this EXACT JSON format:
+        {
+            "differences": [
+                {
+                    "type": "Price Error",
+                    "description": "Specific error description",
+                    "box1": [x1, y1, x2, y2],
+                    "box2": [x1, y1, x2, y2]
+                }
+            ]
+        }
+
+        Where:
+        - box1 = bounding box coordinates in the FIRST image
+        - box2 = bounding box coordinates in the SECOND image
+        - Coordinates should tightly surround just the error area (not the entire product)
 
         If no issues found, return: {"differences": []}
+
+        Examples of good bounding boxes:
+        - Price error: Box around just the price text "$12.47"
+        - Text error: Box around just the misspelled word "clorox"
+        - Image error: Box around the corrupted image area
 
         Only report actual production errors that would require fixing.
         """
@@ -1607,7 +1731,15 @@ class PracticalCatalogComparator:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": system_prompt},
+                        {
+                            "type": "text", 
+                            "text": "FIRST IMAGE (for box1 coordinates):"
+                        },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
+                        {
+                            "type": "text", 
+                            "text": "SECOND IMAGE (for box2 coordinates):"
+                        },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
                     ]
                 }
@@ -1617,8 +1749,8 @@ class PracticalCatalogComparator:
                 model=self.vlm_model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                max_tokens=1000,
-                temperature=0.1
+                max_tokens=1500,  # Increased for bounding box data
+                temperature=0.05  # Lower temperature for more precise coordinates
             )
 
             response_content = response.choices[0].message.content
@@ -1627,7 +1759,7 @@ class PracticalCatalogComparator:
             differences_data = json.loads(response_content)
             raw_differences = differences_data.get("differences", [])
             
-            # Normalize the differences to ensure consistent format
+            # Enhanced normalization with bounding box validation
             normalized_differences = []
             
             for i, diff in enumerate(raw_differences):
@@ -1638,7 +1770,7 @@ class PracticalCatalogComparator:
                 # Create normalized difference object
                 normalized_diff = {}
                 
-                # Handle different possible field names for "type"
+                # Handle type field (as before)
                 if "type" in diff:
                     normalized_diff["type"] = diff["type"]
                 elif "issue" in diff:
@@ -1656,7 +1788,7 @@ class PracticalCatalogComparator:
                         normalized_diff["type"] = "Unknown Error"
                     logger.warning(f"ITEM_ID: {item_id_for_log} - No 'type' field found, inferred: {normalized_diff['type']}")
                 
-                # Handle different possible field names for "description"
+                # Handle description field (as before)
                 if "description" in diff:
                     normalized_diff["description"] = diff["description"]
                 elif "details" in diff:
@@ -1669,19 +1801,39 @@ class PracticalCatalogComparator:
                     issue = diff.get("issue", diff.get("type", ""))
                     normalized_diff["description"] = f"{product}: {issue}" if product else str(issue)
                 
-                # Copy over any bounding box information if present
-                if "box1" in diff:
-                    normalized_diff["box1"] = diff["box1"]
-                if "box2" in diff:
-                    normalized_diff["box2"] = diff["box2"]
+                # NEW: Validate and normalize bounding box information
+                box1 = diff.get("box1")
+                box2 = diff.get("box2")
                 
-                # Add any other fields that might be useful
+                # Validate bounding boxes
+                if self._is_valid_bounding_box(box1):
+                    normalized_diff["box1"] = box1
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Valid box1 found: {box1}")
+                else:
+                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid or missing box1: {box1}")
+                    # Could provide a default box covering a reasonable area
+                    normalized_diff["box1"] = None
+                
+                if self._is_valid_bounding_box(box2):
+                    normalized_diff["box2"] = box2
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Valid box2 found: {box2}")
+                else:
+                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid or missing box2: {box2}")
+                    normalized_diff["box2"] = None
+                
+                # Copy over any other fields that might be useful
                 for key, value in diff.items():
                     if key not in ["type", "description", "details", "issue", "message", "box1", "box2"]:
                         normalized_diff[key] = value
                 
                 normalized_differences.append(normalized_diff)
-                logger.info(f"ITEM_ID: {item_id_for_log} - Normalized Diff {i}: Type='{normalized_diff['type']}', Desc='{normalized_diff.get('description', 'N/A')[:50]}...'")
+                
+                # Enhanced logging
+                has_boxes = normalized_diff.get("box1") and normalized_diff.get("box2")
+                logger.info(f"ITEM_ID: {item_id_for_log} - Normalized Diff {i}: "
+                        f"Type='{normalized_diff['type']}', "
+                        f"Desc='{normalized_diff.get('description', 'N/A')[:50]}...', "
+                        f"HasBoxes={has_boxes}")
             
             logger.info(f"ITEM_ID: {item_id_for_log} - Successfully processed {len(normalized_differences)} differences")
             return normalized_differences
@@ -1693,6 +1845,33 @@ class PracticalCatalogComparator:
         except Exception as e:
             logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
             return []
+        
+    def _is_valid_bounding_box(self, box) -> bool:
+        """
+        Validate that a bounding box has the correct format [x1, y1, x2, y2]
+        """
+        if not isinstance(box, list):
+            return False
+        
+        if len(box) != 4:
+            return False
+        
+        try:
+            x1, y1, x2, y2 = [float(coord) for coord in box]
+            
+            # Basic validation: x2 > x1 and y2 > y1
+            if x2 <= x1 or y2 <= y1:
+                return False
+            
+            # Reasonable coordinate ranges (assuming images are reasonably sized)
+            if any(coord < 0 or coord > 5000 for coord in [x1, y1, x2, y2]):
+                return False
+            
+            return True
+        
+        except (ValueError, TypeError):
+            return False    
+        
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                        catalog1_name: str = None, catalog2_name: str = None,
                        output_path: str = None, price_tolerance: float = 0.01):
