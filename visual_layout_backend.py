@@ -1658,48 +1658,67 @@ class PracticalCatalogComparator:
 
     def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
         """
-        Enhanced VLM function that detects differences AND provides bounding box coordinates
+        Enhanced VLM function with better bounding box detection guidance
         """
         
         system_prompt = """
-        You are a quality control expert comparing two versions of a retail catalog to find PRODUCTION ERRORS with precise locations.
+        You are a quality control expert comparing two retail product images to find PRODUCTION ERRORS with precise locations.
 
-        Your task: Compare these products and identify obvious quality control issues, providing exact locations for each error.
+        TASK: Find obvious quality control issues and provide EXACT bounding box coordinates for each error.
 
-        Look for these types of errors:
+        ERROR TYPES TO DETECT:
 
         1. **Price Errors**: 
-        - Same/similar products with significantly different prices (>$3 difference)
-        - Obvious price typos (like $199.99 vs $19.99)
-        - Missing prices or price formatting errors
-        - $0.00 prices (likely incorrect)
+        - Significantly different prices (>$3 difference) for similar products
+        - Obviously incorrect prices ($0.00, $999.99, etc.)
+        - Missing price information
+        - Malformed price text
 
         2. **Text Errors**:
-        - Clear spelling mistakes or typos in product names
-        - Missing or garbled text (like "Variedad 57 tandas 60 tandas")
-        - Wrong product descriptions that don't match the image
-        - Capitalization errors (like "clorox" vs "Clorox")
+        - Spelling mistakes in product names (e.g., "clorox" vs "Clorox")
+        - Garbled or corrupted text (e.g., "Variedad 57 tandas 60 tandas")
+        - Missing or incomplete product descriptions
+        - Wrong product names for the shown image
 
         3. **Image Errors**:
-        - Obviously wrong product photos
-        - Corrupted, missing, or broken images
-        - Misaligned or overlapping elements
+        - Wrong product photos (completely different products)
+        - Corrupted, pixelated, or missing images
+        - Severely misaligned elements
 
         IGNORE these normal variations:
-        - Different brands in the same position (Tide vs Gain is normal)
-        - Different product categories (detergent vs paper towels is normal)
+        - Different brands in same position (Tide vs Gain = normal)
+        - Different product categories (detergent vs paper towels = normal)
         - Minor price differences (<$3)
-        - Different promotional banners or seasonal decorations
-        - Minor lighting or color variations
+        - Different promotional banners
+        - Slight color/lighting variations
 
-        CRITICAL: For each error found, you MUST provide bounding box coordinates [x1, y1, x2, y2] for the specific error area in BOTH images.
+        CRITICAL BOUNDING BOX INSTRUCTIONS:
+        
+        1. **For Price Errors**: Draw box around the ENTIRE price area including dollar sign and cents
+        - Example: For "$12.97" draw box covering the full price text
+        - Make box generous enough to include any price formatting
+        
+        2. **For Text Errors**: Draw box around the ENTIRE problematic text area
+        - Example: For misspelled "clorox" draw box covering the whole brand name area
+        - Include surrounding context if text is part of larger description
+        
+        3. **Box Size Guidelines**:
+        - Minimum box size: 60x30 pixels (width x height)
+        - For prices: typically 80-150 pixels wide, 30-50 pixels tall
+        - For product names: typically 100-250 pixels wide, 30-60 pixels tall
+        - For descriptions: can be 200-400 pixels wide, 40-80 pixels tall
+        
+        4. **Coordinate System**: Use absolute pixel coordinates within each image
+        - (0,0) is top-left corner of the image
+        - X increases going right, Y increases going down
+        - Typical product image size is 400-600 pixels wide, 400-800 pixels tall
 
-        Return your response in this EXACT JSON format:
+        RESPONSE FORMAT - Return this EXACT JSON structure:
         {
             "differences": [
                 {
                     "type": "Price Error",
-                    "description": "Specific error description",
+                    "description": "Specific detailed description of the error",
                     "box1": [x1, y1, x2, y2],
                     "box2": [x1, y1, x2, y2]
                 }
@@ -1707,18 +1726,20 @@ class PracticalCatalogComparator:
         }
 
         Where:
-        - box1 = bounding box coordinates in the FIRST image
-        - box2 = bounding box coordinates in the SECOND image
-        - Coordinates should tightly surround just the error area (not the entire product)
+        - box1 = coordinates in FIRST image [left, top, right, bottom]
+        - box2 = coordinates in SECOND image [left, top, right, bottom]
+        - Coordinates must be integers
+        - Ensure x2 > x1 and y2 > y1
+        - Make boxes large enough to clearly see the error area
 
-        If no issues found, return: {"differences": []}
+        EXAMPLES of good bounding boxes:
+        - Price "$12.47": [50, 20, 130, 55]
+        - Brand name "Clorox": [20, 100, 150, 135]  
+        - Product description line: [15, 200, 350, 240]
 
-        Examples of good bounding boxes:
-        - Price error: Box around just the price text "$12.47"
-        - Text error: Box around just the misspelled word "clorox"
-        - Image error: Box around the corrupted image area
+        If no production errors found, return: {"differences": []}
 
-        Only report actual production errors that would require fixing.
+        Focus on OBVIOUS errors that clearly need fixing, not minor variations.
         """
         
         try:
@@ -1733,12 +1754,12 @@ class PracticalCatalogComparator:
                         {"type": "text", "text": system_prompt},
                         {
                             "type": "text", 
-                            "text": "FIRST IMAGE (for box1 coordinates):"
+                            "text": "FIRST IMAGE - Look for errors and provide box1 coordinates:"
                         },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
                         {
                             "type": "text", 
-                            "text": "SECOND IMAGE (for box2 coordinates):"
+                            "text": "SECOND IMAGE - Look for errors and provide box2 coordinates:"
                         },
                         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
                     ]
@@ -1749,8 +1770,8 @@ class PracticalCatalogComparator:
                 model=self.vlm_model,
                 messages=messages,
                 response_format={"type": "json_object"},
-                max_tokens=1500,  # Increased for bounding box data
-                temperature=0.05  # Lower temperature for more precise coordinates
+                max_tokens=2000,  # Increased for detailed analysis
+                temperature=0.1   # Low temperature for consistent results
             )
 
             response_content = response.choices[0].message.content
@@ -1759,7 +1780,7 @@ class PracticalCatalogComparator:
             differences_data = json.loads(response_content)
             raw_differences = differences_data.get("differences", [])
             
-            # Enhanced normalization with bounding box validation
+            # Enhanced normalization with better bounding box validation
             normalized_differences = []
             
             for i, diff in enumerate(raw_differences):
@@ -1767,10 +1788,9 @@ class PracticalCatalogComparator:
                     logger.warning(f"ITEM_ID: {item_id_for_log} - Skipping non-dict difference at index {i}: {diff}")
                     continue
                 
-                # Create normalized difference object
                 normalized_diff = {}
                 
-                # Handle type field (as before)
+                # Handle type field
                 if "type" in diff:
                     normalized_diff["type"] = diff["type"]
                 elif "issue" in diff:
@@ -1778,7 +1798,6 @@ class PracticalCatalogComparator:
                 elif "category" in diff:
                     normalized_diff["type"] = diff["category"]
                 else:
-                    # Default type based on content analysis
                     desc = str(diff.get("description", diff.get("details", "")))
                     if "price" in desc.lower():
                         normalized_diff["type"] = "Price Error"
@@ -1788,7 +1807,7 @@ class PracticalCatalogComparator:
                         normalized_diff["type"] = "Unknown Error"
                     logger.warning(f"ITEM_ID: {item_id_for_log} - No 'type' field found, inferred: {normalized_diff['type']}")
                 
-                # Handle description field (as before)
+                # Handle description field
                 if "description" in diff:
                     normalized_diff["description"] = diff["description"]
                 elif "details" in diff:
@@ -1796,32 +1815,37 @@ class PracticalCatalogComparator:
                 elif "message" in diff:
                     normalized_diff["description"] = diff["message"]
                 else:
-                    # Create description from available fields
                     product = diff.get("product", "")
                     issue = diff.get("issue", diff.get("type", ""))
                     normalized_diff["description"] = f"{product}: {issue}" if product else str(issue)
                 
-                # NEW: Validate and normalize bounding box information
+                # Enhanced bounding box validation and normalization
                 box1 = diff.get("box1")
                 box2 = diff.get("box2")
                 
-                # Validate bounding boxes
+                # Validate and potentially fix bounding boxes
                 if self._is_valid_bounding_box(box1):
+                    # Ensure minimum box size
+                    box1 = self._ensure_minimum_box_size(box1)
                     normalized_diff["box1"] = box1
                     logger.info(f"ITEM_ID: {item_id_for_log} - Valid box1 found: {box1}")
                 else:
-                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid or missing box1: {box1}")
-                    # Could provide a default box covering a reasonable area
-                    normalized_diff["box1"] = None
+                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid box1: {box1}")
+                    # Try to create a reasonable default box
+                    normalized_diff["box1"] = self._create_default_box(normalized_diff["type"])
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Using default box1: {normalized_diff['box1']}")
                 
                 if self._is_valid_bounding_box(box2):
+                    box2 = self._ensure_minimum_box_size(box2)
                     normalized_diff["box2"] = box2
                     logger.info(f"ITEM_ID: {item_id_for_log} - Valid box2 found: {box2}")
                 else:
-                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid or missing box2: {box2}")
-                    normalized_diff["box2"] = None
+                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid box2: {box2}")
+                    # Try to create a reasonable default box
+                    normalized_diff["box2"] = self._create_default_box(normalized_diff["type"])
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Using default box2: {normalized_diff['box2']}")
                 
-                # Copy over any other fields that might be useful
+                # Copy over any other fields
                 for key, value in diff.items():
                     if key not in ["type", "description", "details", "issue", "message", "box1", "box2"]:
                         normalized_diff[key] = value
@@ -1830,10 +1854,14 @@ class PracticalCatalogComparator:
                 
                 # Enhanced logging
                 has_boxes = normalized_diff.get("box1") and normalized_diff.get("box2")
+                box1_size = self._get_box_size(normalized_diff.get("box1"))
+                box2_size = self._get_box_size(normalized_diff.get("box2"))
+                
                 logger.info(f"ITEM_ID: {item_id_for_log} - Normalized Diff {i}: "
                         f"Type='{normalized_diff['type']}', "
                         f"Desc='{normalized_diff.get('description', 'N/A')[:50]}...', "
-                        f"HasBoxes={has_boxes}")
+                        f"HasBoxes={has_boxes}, "
+                        f"Box1Size={box1_size}, Box2Size={box2_size}")
             
             logger.info(f"ITEM_ID: {item_id_for_log} - Successfully processed {len(normalized_differences)} differences")
             return normalized_differences
@@ -1845,6 +1873,76 @@ class PracticalCatalogComparator:
         except Exception as e:
             logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
             return []
+
+    def _is_valid_bounding_box(self, box) -> bool:
+        """Validate bounding box format and dimensions"""
+        if not isinstance(box, list) or len(box) != 4:
+            return False
+        
+        try:
+            x1, y1, x2, y2 = [float(coord) for coord in box]
+            
+            # Basic validation: x2 > x1 and y2 > y1
+            if x2 <= x1 or y2 <= y1:
+                return False
+            
+            # Reasonable coordinate ranges (assuming reasonable image sizes)
+            if any(coord < 0 or coord > 2000 for coord in [x1, y1, x2, y2]):
+                return False
+            
+            # Minimum size requirement
+            width = x2 - x1
+            height = y2 - y1
+            if width < 20 or height < 15:  # Too small to be useful
+                return False
+            
+            return True
+        
+        except (ValueError, TypeError):
+            return False
+
+    def _ensure_minimum_box_size(self, box, min_width=60, min_height=30):
+        """Ensure bounding box meets minimum size requirements"""
+        if not box:
+            return box
+        
+        x1, y1, x2, y2 = box
+        width = x2 - x1
+        height = y2 - y1
+        
+        # Expand box if too small
+        if width < min_width:
+            expand_x = (min_width - width) / 2
+            x1 = max(0, x1 - expand_x)
+            x2 = x1 + min_width
+        
+        if height < min_height:
+            expand_y = (min_height - height) / 2
+            y1 = max(0, y1 - expand_y)
+            y2 = y1 + min_height
+        
+        return [int(x1), int(y1), int(x2), int(y2)]
+
+    def _create_default_box(self, error_type):
+        """Create a reasonable default bounding box based on error type"""
+        if "price" in error_type.lower():
+            # Price area typically in upper right
+            return [300, 20, 450, 60]
+        elif "text" in error_type.lower():
+            # Text area typically in center/left
+            return [50, 150, 300, 200]
+        else:
+            # Generic center box
+            return [100, 100, 300, 200]
+
+    def _get_box_size(self, box):
+        """Get readable box size description"""
+        if not box or len(box) != 4:
+            return "Invalid"
+        
+        width = box[2] - box[0]
+        height = box[3] - box[1]
+        return f"{width}x{height}"
         
     def _is_valid_bounding_box(self, box) -> bool:
         """
