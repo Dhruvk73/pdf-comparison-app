@@ -335,7 +335,6 @@ st.markdown("</div>", unsafe_allow_html=True)
 st.markdown("---")
 
 # --- Display Results Section ---
-# --- Display Results Section ---
 if 'comparison_results' in st.session_state:
     results = st.session_state.comparison_results
 
@@ -344,20 +343,21 @@ if 'comparison_results' in st.session_state:
     else:
         # --- Summary Metrics ---
         st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Error Summary</h2>", unsafe_allow_html=True)
-
-        # ### THIS IS THE KEY FIX ###
-        # It now reads the summary directly from the backend results instead of recalculating.
-        summary = results.get("summary_metrics", {})
-        total_mistakes = summary.get('incorrect_matches', 0)
-        price_mistakes = summary.get('price_issues', 0)
-        text_mistakes = summary.get('text_issues', 0)
-        image_mistakes = summary.get('image_issues', 0)
+        
+        # Calculate totals from the results
+        all_diffs = [diff for row in results.get("product_comparison_details", []) for diff in row.get("granular_differences", [])]
+        price_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Price')
+        text_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Text')
+        image_mistakes = sum(1 for d in all_diffs if d.get('type') == 'Image')
+        total_mistakes = price_mistakes + text_mistakes + image_mistakes
 
         sum_col1, sum_col2, sum_col3, sum_col4 = st.columns(4)
         sum_col1.metric("Total Discrepancies", total_mistakes)
         sum_col2.metric("Price Issues", price_mistakes)
         sum_col3.metric("Text/Brand Issues", text_mistakes)
         sum_col4.metric("Image Mismatches", image_mistakes)
+        
+        # --- End of new section ---
 
         # --- Visual Comparison Section (Full Pages) ---
         highlighted_pages_file1 = st.session_state.get('highlighted_pages_file1', [])
@@ -365,19 +365,19 @@ if 'comparison_results' in st.session_state:
 
         if (highlighted_pages_file1 and any(img for img in highlighted_pages_file1)) or \
            (highlighted_pages_file2 and any(img for img in highlighted_pages_file2)):
-
+            
             st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:2.5rem; margin-bottom:0.5rem;'>Visual Page Analysis</h2>", unsafe_allow_html=True)
-            st.markdown(f"<p class='subtitle' style='margin-bottom:1.5rem;'>Products with detected errors are outlined in yellow with an indicator at the top-left.</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='subtitle' style='margin-bottom:1.5rem;'>Detected product boxes are shown for each page. Errors are highlighted in red.</p>", unsafe_allow_html=True)
 
             num_pages_to_display = max(len(highlighted_pages_file1), len(highlighted_pages_file2))
 
             for page_idx in range(num_pages_to_display):
                 st.markdown("---")
                 st.markdown(f"<p class='page-analysis-header'>Page {page_idx + 1} Analysis</p>", unsafe_allow_html=True)
-
+                
                 col1, col2 = st.columns(2)
 
-                # Display for PDF 1
+                # --- CORRECTED HTML/Markdown for PDF 1 ---
                 with col1:
                     if page_idx < len(highlighted_pages_file1) and highlighted_pages_file1[page_idx]:
                         st.markdown(f"""
@@ -392,7 +392,7 @@ if 'comparison_results' in st.session_state:
                     else:
                         st.info(f"No visualization available for {st.session_state.get('file1_name', 'File 1')} - Page {page_idx + 1}.")
 
-                # Display for PDF 2
+                # --- CORRECTED HTML/Markdown for PDF 2 ---
                 with col2:
                     if page_idx < len(highlighted_pages_file2) and highlighted_pages_file2[page_idx]:
                         st.markdown(f"""

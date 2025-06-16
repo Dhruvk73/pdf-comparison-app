@@ -288,108 +288,83 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
     os.remove(temp_img_path)
     return sortable_boxes, saved_cropped_files
 
+# In SCRIPT 1
 
-
-def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
+def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_product_ranks: Optional[set] = None):
     """
-    Creates a visualization with a yellow outline around products with issues
-    and a small yellow square in the top-left corner as an error indicator.
-    Removes the old red boxes and text labels.
-    """
-    img_copy = pil_img.copy()
-    draw = ImageDraw.Draw(img_copy, "RGBA")
-
-    if issue_details_per_rank is None:
-        issue_details_per_rank = {}
-
-    # --- STYLING ---
-    product_outline_color = (255, 255, 0, 255)  # Solid, bright yellow
-    indicator_size = 40  # Size of the small square indicator
-
-    logger.info(f"Processing {len(issue_details_per_rank)} products with issues for visualization.")
-
-    # Then, draw highlights and indicators for items with issues
-    for rank, differences in issue_details_per_rank.items():
-        if not differences:
-            continue
-
-        if (rank - 1) >= len(boxes):
-            logger.warning(f"Rank {rank} is out of bounds for the list of boxes. Skipping.")
-            continue
-
-        # --- PRODUCT HIGHLIGHT ---
-        box_data = boxes[rank - 1]
-        product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
-
-        # 1. Draw the main yellow outline around the entire product
-        draw.rectangle(product_box_coords, outline=product_outline_color, width=15)
-        logger.info(f"Drew yellow outline for rank {rank} at {product_box_coords}")
-
-        # 2. Draw the small yellow error indicator at the top-left corner
-        p_x1, p_y1 = product_box_coords[0], product_box_coords[1]
-        indicator_box = [p_x1, p_y1, p_x1 + indicator_size, p_y1 + indicator_size]
-        draw.rectangle(indicator_box, fill=product_outline_color)
-        logger.info(f"Drew error indicator for rank {rank} at {indicator_box}")
-
-    img_copy.save(output_path, "JPEG", quality=95)
-    logger.info(f"Visualization with new indicator style saved to: {output_path}")
-
-def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
-    """
-    Fallback visualization when no specific bounding boxes are available - highlights entire products
+    Create a visualization showing the ranking order on the original image.
+    Only highlights issues in red if issue_product_ranks is provided and is not empty.
+    Correct products will not have any boxes drawn on them.
     """
     img_copy = pil_img.copy()
-    draw = ImageDraw.Draw(img_copy, "RGBA")
+    draw = ImageDraw.Draw(img_copy)
 
     try:
-        font = ImageFont.truetype("arial.ttf", 32)
-        label_font = ImageFont.truetype("arialbd.ttf", 28)
+        # Try to load a common font, fallback to default
+        font = ImageFont.truetype("arial.ttf", 30)
     except IOError:
-        font = ImageFont.load_default()
-        label_font = ImageFont.load_default()
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 30) # Common on Linux
+        except IOError:
+            font = ImageFont.load_default()
+            logger.warning("Arial/DejaVuSans font not found, using default. Rank numbers might be small.")
 
-    if issue_details_per_rank is None:
-        issue_details_per_rank = {}
+    # default_box_color = "blue" # REMOVED - No default boxes for correct items
+    issue_box_color = "red"
+    font_color = "black"
+    font_background_color = "yellow" # For the rank number background
 
-    # Yellow highlighting for products with issues
-    product_highlight_color = (255, 255, 0, 100)  # Yellow with transparency
-    text_color = (255, 255, 255)
+    if not boxes:
+        logger.info(f"No boxes to visualize for {output_path}. Saving original image.")
+        # EXISTING (or implied previous quality):
+        # img_copy.save(output_path, "JPEG", quality=95) 
+        # NEW (optimized for display):
+        img_copy.save(output_path, "JPEG", quality=85) 
+        return
 
-    for rank, differences in issue_details_per_rank.items():
-        if not differences:
-            continue
+    if issue_product_ranks is None: # Ensure issue_product_ranks is a set for efficient lookup
+        issue_product_ranks = set()
 
-        if (rank - 1) < len(boxes):
-            box_data = boxes[rank - 1]
-            product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
+    for idx, box_data in enumerate(boxes): # Renamed 'box' to 'box_data' for clarity
+        current_rank = idx + 1  # Rank is 1-based from the list order
+
+        # --- NEW LOGIC: Only draw if it's an issue ---
+        if current_rank in issue_product_ranks:
+            box_outline_color_to_use = issue_box_color # It's an issue, use red
+
+            left = int(box_data.get("left", 0))
+            top = int(box_data.get("top", 0))
+            right = int(box_data.get("right", pil_img.width))
+            bottom = int(box_data.get("bottom", pil_img.height))
+
+            draw.rectangle([left, top, right, bottom], outline=box_outline_color_to_use, width=4)
+
+            rank_text = str(current_rank)
+            # Use textbbox for modern PIL to get accurate text size
+            try:
+                text_bbox = draw.textbbox((0, 0), rank_text, font=font)
+                text_width = text_bbox[2] - text_bbox[0]
+                text_height = text_bbox[3] - text_bbox[1]
+            except AttributeError: # Fallback for older Pillow versions
+                text_width, text_height = draw.textsize(rank_text, font=font)
             
-            # Highlight entire product in yellow
-            draw.rectangle(product_box_coords, fill=product_highlight_color, outline="yellow", width=3)
-            
-            # Add issue count label
-            issue_types = [d.get("type", "Unknown") for d in differences]
-            label_text = f"Issues: {len(differences)}"
-            
-            label_y = product_box_coords[1] - 25
-            if label_y > 0:
-                draw.text((product_box_coords[0], label_y), label_text, fill=text_color, font=label_font, 
-                         stroke_width=2, stroke_fill="black")
+            text_x = left + 5  # Position rank number inside the box
+            text_y = top + 5
 
-    img_copy.save(output_path, "JPEG", quality=90)
-    logger.info(f"Fallback visualization saved to: {output_path}")
+            # Draw background for the rank number for better visibility
+            draw.rectangle(
+                [text_x - 3, text_y - 3, text_x + text_width + 3, text_y + text_height + 3],
+                fill=font_background_color,
+                outline="black", 
+                width=1
+            )
+            draw.text((text_x, text_y), rank_text, fill=font_color, font=font)
 
-def validate_same_product(self, product1_path: str, product2_path: str) -> bool:
-    """Optional: Quick brand validation to ensure we're comparing same products"""
-    
-    # Extract just brand names quickly
-    brand1 = self.extract_brand_only(product1_path)
-    brand2 = self.extract_brand_only(product2_path)
-    
-    if brand1 and brand2:
-        similarity = fuzz.ratio(brand1.lower(), brand2.lower())
-        return similarity > 70  # 70% similarity threshold
-    
-    return True  # Assume same product if can't extract brands
+    img_copy.save(output_path, "JPEG", quality=85)
+    logger.info(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks and len(issue_product_ranks) > 0)})")
+    # print(f"Ranking visualization saved to: {output_path} (Issues highlighted: {bool(issue_product_ranks)})")
+
+# In SCRIPT 1
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
                                      ranking_method="improved_grid", filter_small_boxes=True,
@@ -1145,59 +1120,134 @@ class PracticalCatalogComparator:
         logger.info(f"Loaded {len(image_files)} ranked images from {folder_path}")
         return image_files
 
-    def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
-        """
-        Enhanced VLM function with a more specific prompt to reduce false positives.
-        """
-        system_prompt = """
-        You are a highly specialized visual quality control inspector for retail catalogs. Your single focus is to identify SIGNIFICANT PRODUCTION ERRORS between two product images at the same position.
+    def extract_product_data_with_vlm(self, image_path: str, image_rank: int,
+                                     catalog_name: str) -> Dict:
+        """Extract focused product data - only what matters for comparison"""
+        item_id_for_log = f"{catalog_name}-Rank{image_rank}"
 
-        **CRITICAL RULES - READ CAREFULLY:**
-        1.  **IGNORE Minor Text Variations:** Do NOT report differences in capitalization (e.g., 'Tide' vs. 'tide'), pluralization (e.g., 'roll' vs. 'rolls'), or subtle descriptive wording changes. These are NOT errors.
-        2.  **IGNORE Minor Price Variations:** Do NOT report price differences unless they are greater than $3.00 OR one of the prices is clearly nonsensical (e.g., $0.00, partial text).
-        3.  **IGNORE Minor Image Variations:** Do NOT report differences in lighting, angle, or background.
-
-        **REPORT ONLY THE FOLLOWING ERRORS:**
-        -   **Price Error:** The main offer price differs by MORE than $3.00, or is garbled/missing.
-        -   **Text Error:** The primary BRAND name is fundamentally different (e.g., 'Tide' vs 'Gain'), or the product SIZE/COUNT is substantially different (e.g., '50 oz' vs '100 oz').
-        -   **Image Error:** The core product is completely wrong (e.g., a bottle of soda vs. a bag of chips).
-
-        **RESPONSE FORMAT:**
-        -   Return a JSON object: `{"differences": []}`.
-        -   If you find a valid error based on the rules above, populate the list. Each difference must have:
-            -   `"type"`: Must be "Price Error", "Text Error", or "Image Error".
-            -   `"description"`: A concise explanation (e.g., "Price difference: $4.99 vs $8.99", "Brand mismatch: Tide vs Gain", "Size mismatch: 12 rolls vs 24 rolls").
-            -   `"box1"`: Bounding box [x1, y1, x2, y2] of the error in the FIRST image. If no specific box, provide `null`.
-            -   `"box2"`: Bounding box [x1, y1, x2, y2] of the error in the SECOND image. If no specific box, provide `null`.
-        -   If there are NO significant errors, return an empty list: `{"differences": []}`.
-        """
         try:
-            with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
-                b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
-                b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
+            with open(image_path, "rb") as image_file:
+                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
 
-            messages = [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": system_prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
-                ]
-            }]
+            # Focused VLM prompt - only extract what we need for comparison
+            system_prompt = """You are a product information extraction expert for retail catalog comparison.
+            Focus ONLY on extracting the essential information needed for accurate product matching.
+
+            EXTRACTION PRIORITIES (in order of importance):
+
+            1. PRICES (CRITICAL):
+               - Strictly Extract the Main offer price (large, prominent price - usually placed top-right)
+               - Strictly Extract Regular price  (which will be given below the product with the description)
+               - Format handling: "8 87" → 8.87, "887" → 8.87, "1097" → 10.97
+               - Unit indicators: "c/u", "ea.", "each"
+
+            2. BRAND IDENTIFICATION (CRITICAL):
+               - Brand name from packaging, logos, or text
+               - Extract exactly as shown, including variants like for e.g "Ace Simply"
+               - Focus on the main brand, not minor descriptors
+
+            3. PRODUCT BASICS:
+               - Core product name/type (detergent, cleaner, etc.)
+               - Size/quantity if clearly visible
+               - Only extract what's clearly readable - don't guess
+
+            4. IGNORE MINOR DETAILS:
+               - Don't worry about exact wording of descriptions
+               - Skip fine print unless it's price-related
+               - Focus on core product identity, not marketing language
+
+            COMPARISON FOCUS:
+            The goal is to compare if these are the SAME PRODUCT at the SAME PRICE.
+            Minor text differences, word order, or description variations don't matter.
+            What matters: Brand match + Price match + Basic product type match.
+
+            Return JSON with these fields:
+            - "offer_price": Main price (decimal or null)
+            - "regular_price": Regular price if shown (decimal or null)
+            - "product_brand": Primary brand name
+            - "product_type": Basic product type (detergent, cleaner, etc.)
+            - "size_quantity": Size if clearly visible
+            - "product_status": "Product Present" or "Product Missing"
+            - "confidence_score": How confident you are in the extraction (1-10)
+
+            Be precise with prices and brands which are present. Extract as it is. Be flexible with everything else. Strictly do not generate any information on your own"""
+
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": system_prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
+                        }
+                    ]
+                }
+            ]
+
+            logger.info(f"ITEM_ID: {item_id_for_log} - Extracting focused product data")
 
             response = self.openai_client.chat.completions.create(
-                model=self.vlm_model, messages=messages,
-                response_format={"type": "json_object"}, max_tokens=1024, temperature=0.0
+                model=self.vlm_model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                max_tokens=2000,
+                temperature=0.1
             )
+
             response_content = response.choices[0].message.content
-            logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
-            # Add robust parsing to handle potential VLM inconsistencies
-            parsed_json = json.loads(response_content)
-            return parsed_json.get("differences", [])
+
+            if response_content is None:
+                return {"error_message": "VLM returned no content", "item_id": item_id_for_log}
+
+            extracted_data = json.loads(response_content)
+
+            # Ensure expected fields exist
+            default_fields = {
+                'offer_price': None,
+                'regular_price': None,
+                'product_brand': None,
+                'product_type': None,
+                'size_quantity': None,
+                'product_status': 'Product Present',
+                'confidence_score': 5
+            }
+
+            for field, default_value in default_fields.items():
+                if field not in extracted_data:
+                    extracted_data[field] = default_value
+
+            # Parse prices
+            extracted_data['offer_price'] = self.parse_price_string(
+                extracted_data.get('offer_price'), f"{item_id_for_log}-offer"
+            )
+            extracted_data['regular_price'] = self.parse_price_string(
+                extracted_data.get('regular_price'), f"{item_id_for_log}-regular"
+            )
+
+            # Add metadata
+            extracted_data.update({
+                'item_id': item_id_for_log,
+                'image_path': image_path,
+                'rank': image_rank,
+                'catalog_name': catalog_name,
+                'filename': Path(image_path).name
+            })
+
+            # Normalize brand
+            extracted_data = self.normalize_product_data(extracted_data)
+
+            logger.info(f"ITEM_ID: {item_id_for_log} - Extraction complete: "
+                       f"Brand: {extracted_data.get('product_brand', 'No Brand')}, "
+                       f"Price: ${extracted_data.get('offer_price', 'No Price')}, "
+                       f"Size: {extracted_data.get('size_quantity', 'No Size')}, "
+                       f"Confidence: {extracted_data.get('confidence_score', 0)}/10")
+
+            return extracted_data
 
         except Exception as e:
-            logger.error(f"ITEM_ID: {item_id_for_log} - VLM Error: {e}")
-            return []
+            logger.error(f"ITEM_ID: {item_id_for_log} - Extraction error: {e}")
+            return {"error_message": str(e), "item_id": item_id_for_log}
 
     def parse_price_string(self, price_input, item_id_for_log="N/A"):
         """Enhanced price parsing for retail formats"""
@@ -1301,179 +1351,210 @@ class PracticalCatalogComparator:
         return is_same, max_score
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
-                           catalog1_name: str = None, catalog2_name: str = None) -> Dict:
-        """Generate practical comparison focused on what matters with enhanced debugging"""
+                                   catalog1_name: str = None, catalog2_name: str = None) -> Dict:
+        """Generate practical comparison focused on what matters"""
         if not catalog1_name:
             catalog1_name = Path(folder1_path).name
         if not catalog2_name:
             catalog2_name = Path(folder2_path).name
 
         logger.info(f"Starting practical comparison: {catalog1_name} vs {catalog2_name}")
-        logger.info(f"Focus: Position-based comparison for quality control")
+        logger.info(f"Focus: Price differences and different products only")
 
         # Load and process images
         catalog1_images = self.load_ranked_images_from_folder(folder1_path)
         catalog2_images = self.load_ranked_images_from_folder(folder2_path)
 
-        # Create lookup dictionaries by rank for easy access
-        cat1_by_rank = {img['rank']: img for img in catalog1_images}
-        cat2_by_rank = {img['rank']: img for img in catalog2_images}
+        # Extract product data
+        logger.info("Extracting focused product data from Catalog 1...")
+        catalog1_products = {}
+        for img_info in catalog1_images:
+            product_data = self.extract_product_data_with_vlm(
+                img_info['file_path'],
+                img_info['rank'],
+                catalog1_name
+            )
+            if "error_message" not in product_data:
+                catalog1_products[img_info['rank']] = product_data
+
+        logger.info("Extracting focused product data from Catalog 2...")
+        catalog2_products = {}
+        for img_info in catalog2_images:
+            product_data = self.extract_product_data_with_vlm(
+                img_info['file_path'],
+                img_info['rank'],
+                catalog2_name
+            )
+            if "error_message" not in product_data:
+                catalog2_products[img_info['rank']] = product_data
+
+        # ===============================================================
+# ADD THIS NEW LOGIC IN ITS PLACE
+# ===============================================================
 
         comparison_rows = []
-        
-        # Get maximum rank to compare
-        max_rank = max(
-            max(cat1_by_rank.keys()) if cat1_by_rank else 0,
-            max(cat2_by_rank.keys()) if cat2_by_rank else 0
-        )
-        
-        logger.info(f"Comparing {max_rank} positions between catalogs")
+      
+      # Convert the dictionary of catalog 2 products into a list we can modify
+        unmatched_c2_products = list(catalog2_products.values())
+      
+      # --- Part 1: Find matches for every product in Catalog 1 ---
+        for p1_rank, p1_data in catalog1_products.items():
+          best_match_p2 = None
+          highest_score = -1
 
-        # POSITION-BASED COMPARISON (no brand matching needed)
-        for rank in range(1, max_rank + 1):
-            product1_info = cat1_by_rank.get(rank)  # Product at this position in catalog 1
-            product2_info = cat2_by_rank.get(rank)  # Product at this position in catalog 2
-            
-            # Create comparison row using existing function
-            row = self.create_practical_comparison_row(
-                product1_info, product2_info, rank, catalog1_name, catalog2_name
-            )
-            if row:
-                comparison_rows.append(row)
-                
-                # Debug logging for each row
-                result_status = row.get("comparison_result", "UNKNOWN")
-                issue_type = row.get("issue_type", "N/A")
-                differences_count = len(row.get("granular_differences", []))
-                
-                if result_status == "INCORRECT":
-                    logger.info(f"Position {rank}: {result_status} - {issue_type} - {differences_count} differences")
+          # Find the best possible match in the list of unmatched catalog 2 products
+          for p2_data in unmatched_c2_products:
+              # Use the brand similarity function you already wrote
+              is_match, score = self.are_brands_same_product(
+                  p1_data.get('product_brand'), 
+                  p2_data.get('product_brand')
+              )
+              
+              # If it's a potential match and has a higher score than previous findings
+              if is_match and score > highest_score:
+                  highest_score = score
+                  best_match_p2 = p2_data
+          
+          if best_match_p2:
+              # A confident match was found! Create the comparison row.
+              row = self.create_practical_comparison_row(p1_data, best_match_p2, p1_rank, catalog1_name, catalog2_name)
+              if row:
+                  comparison_rows.append(row)
+              
+              # IMPORTANT: Remove the matched product so it can't be matched again
+              unmatched_c2_products.remove(best_match_p2)
+          else:
+              # No match was found for this catalog 1 product, so it's missing from catalog 2
+              row = self.create_practical_comparison_row(p1_data, None, p1_rank, catalog1_name, catalog2_name)
+              if row:
+                  comparison_rows.append(row)
+
+      # --- Part 2: Handle products that are in Catalog 2 but were never matched ---
+      # These are products missing from Catalog 1
+        for p2_data_unmatched in unmatched_c2_products:
+          p2_rank = p2_data_unmatched.get('rank', 'N/A')
+          row = self.create_practical_comparison_row(None, p2_data_unmatched, p2_rank, catalog1_name, catalog2_name)
+          if row:
+              comparison_rows.append(row)
 
         result = {
             "catalog1_name": catalog1_name,
             "catalog2_name": catalog2_name,
             "comparison_rows": comparison_rows,
-            "catalog1_total_products": len(catalog1_images),
-            "catalog2_total_products": len(catalog2_images),
-            "total_positions_compared": max_rank,
+            "catalog1_total_products": len(catalog1_products),
+            "catalog2_total_products": len(catalog2_products),
+            "catalog1_products": catalog1_products,
+            "catalog2_products": catalog2_products,
             "comparison_criteria": {
-                "comparison_type": "Position-based Quality Control",
-                "focus": "Position-to-position comparison for production error detection"
+                "price_tolerance": self.price_tolerance,
+                "brand_similarity_threshold": 80,
+                "focus": "Price differences and different products only"
             }
         }
 
-        # ADD DEBUG CALL HERE
-        debug_summary = self.debug_comparison_results(result)
-        
-        logger.info(f"Position-based comparison complete. Generated {len(comparison_rows)} comparison rows.")
-        logger.info(f"Debug summary: {debug_summary['correct_count']} correct, {debug_summary['incorrect_count']} incorrect")
-        
+        logger.info(f"Practical comparison complete. Generated {len(comparison_rows)} comparison rows.")
         return result
 
     def create_practical_comparison_row(self, product1: Dict, product2: Dict, rank: int,
-                             catalog1_name: str, catalog2_name: str) -> Dict:
-        """Create comparison row for position-based comparison with CORRECTED status logic"""
+                                     catalog1_name: str, catalog2_name: str) -> Dict:
+        """Create practical comparison row - only flag real issues"""
 
-        # Handle missing products at this position
         if not product1 and not product2:
             return None
 
+        # Handle missing products
         if not product1:
+            p2_info = self.format_product_display(product2)
             return {
-                f"{catalog1_name}_details": "MISSING PRODUCT",
-                f"{catalog2_name}_details": f"Position {rank} - Product Present",
-                "comparison_result": "INCORRECT",  # FIXED: Was missing
+                f"{catalog1_name}_details": "Product Missing",
+                f"{catalog2_name}_details": p2_info,
+                "comparison_result": "INCORRECT - Missing Product",
                 "issue_type": "Missing Product",
-                "details": f"Product missing in {catalog1_name} at position {rank}",
-                "granular_differences": []
+                "details": f"Product missing in {catalog1_name}",
+                "price_match": "N/A",
+                "brand_match": "N/A"
             }
 
         if not product2:
+            p1_info = self.format_product_display(product1)
             return {
-                f"{catalog1_name}_details": f"Position {rank} - Product Present",
-                f"{catalog2_name}_details": "MISSING PRODUCT", 
-                "comparison_result": "INCORRECT",  # FIXED: Was missing
+                f"{catalog1_name}_details": p1_info,
+                f"{catalog2_name}_details": "Product Missing",
+                "comparison_result": "INCORRECT - Missing Product",
                 "issue_type": "Missing Product",
-                "details": f"Product missing in {catalog2_name} at position {rank}",
-                "granular_differences": []
+                "details": f"Product missing in {catalog2_name}",
+                "price_match": "N/A",
+                "brand_match": "N/A"
             }
 
-        # Both products exist at this position - compare them directly
-        item_id_for_log = f"Position{rank}"
-        
-        # Call VLM to find specific differences
-        differences = self.find_differences_with_vlm(
-            product1['file_path'],
-            product2['file_path'],
-            item_id_for_log
-        )
+        # Both products present - practical comparison
+        issues = []
 
-        if not differences:
-            # No differences found - products are identical
-            return {
-                f"{catalog1_name}_details": f"Position {rank} - Product Present",
-                f"{catalog2_name}_details": f"Position {rank} - Product Present",
-                "comparison_result": "CORRECT",
-                "issue_type": "Match Confirmed",
-                "details": "Products are identical at this position",
-                "granular_differences": []
-            }
-        else:
-            # FIXED: Differences found - categorize them properly
-            issue_types = []
-            detailed_descriptions = []
-            
-            for diff in differences:
-                diff_type = diff.get('type', 'Unknown Error')
-                diff_desc = diff.get('description', 'No description')
-                
-                issue_types.append(diff_type)
-                detailed_descriptions.append(f"{diff_type}: {diff_desc}")
-            
-            # Create combined issue type and details
-            combined_issue_type = ", ".join(sorted(list(set(issue_types))))
-            combined_details = "; ".join(detailed_descriptions)
-            
-            return {
-                f"{catalog1_name}_details": f"Position {rank} - Product Present",
-                f"{catalog2_name}_details": f"Position {rank} - Product Present",
-                "comparison_result": "INCORRECT",  # FIXED: Ensure this is set correctly
-                "issue_type": combined_issue_type,
-                "details": combined_details,
-                "granular_differences": differences  # FIXED: Store the full differences
-            }
+        # Extract key data with safe None handling
+        p1_offer = product1.get('offer_price')
+        p2_offer = product2.get('offer_price')
 
-    # Also add this debugging function to help track what's happening
-    def debug_comparison_results(self, comparison_result: Dict):
-        """Debug function to log what's in the comparison results"""
-        comparison_rows = comparison_result.get("comparison_rows", [])
-        
-        logger.info(f"=== COMPARISON RESULTS DEBUG ===")
-        logger.info(f"Total comparison rows: {len(comparison_rows)}")
-        
-        correct_count = 0
-        incorrect_count = 0
-        
-        for i, row in enumerate(comparison_rows):
-            result = row.get("comparison_result", "UNKNOWN")
-            issue_type = row.get("issue_type", "N/A")
-            differences = row.get("granular_differences", [])
-            
-            if result == "CORRECT":
-                correct_count += 1
-            elif result == "INCORRECT":
-                incorrect_count += 1
-                logger.info(f"  Row {i+1}: {result} - {issue_type} - {len(differences)} differences")
+        # Safe brand extraction
+        p1_brand_raw = product1.get('product_brand')
+        p2_brand_raw = product2.get('product_brand')
+
+        p1_brand = p1_brand_raw.strip() if p1_brand_raw else ''
+        p2_brand = p2_brand_raw.strip() if p2_brand_raw else ''
+
+        # 1. CHECK BRANDS - Are these the same product?
+        brand_match, brand_score = self.are_brands_same_product(p1_brand, p2_brand)
+
+        if not brand_match and p1_brand and p2_brand:
+            issues.append(f"Different Products: '{p1_brand}' vs '{p2_brand}' (similarity: {brand_score:.1f}%)")
+
+        # 2. CHECK PRICES - Significant price differences only
+        price_issue = False
+        price_details = ""
+
+        if p1_offer is not None and p2_offer is not None:
+            price_diff = abs(float(p1_offer) - float(p2_offer))
+            if price_diff > self.price_tolerance:
+                price_issue = True
+                issues.append(f"Price Difference: ${p1_offer} vs ${p2_offer} (diff: ${price_diff:.2f})")
+                price_details = f"${price_diff:.2f} difference"
+        elif p1_offer is not None and p2_offer is None:
+            price_issue = True
+            issues.append(f"Missing Price: C1=${p1_offer}, C2=No Price")
+            price_details = "Missing price in catalog 2"
+        elif p1_offer is None and p2_offer is not None:
+            price_issue = True
+            issues.append(f"Missing Price: C1=No Price, C2=${p2_offer}")
+            price_details = "Missing price in catalog 1"
+
+        # Determine overall result
+        if issues:
+            if not brand_match and p1_brand and p2_brand:
+                result = "INCORRECT - Different Product"
+                issue_type = "Different Product"
+            elif price_issue:
+                result = "INCORRECT - Price Issue"
+                issue_type = "Price Difference"
             else:
-                logger.warning(f"  Row {i+1}: UNKNOWN STATUS '{result}' - {issue_type}")
-        
-        logger.info(f"Summary: {correct_count} CORRECT, {incorrect_count} INCORRECT")
-        logger.info(f"=== END DEBUG ===")
-        
+                result = "INCORRECT - Multiple Issues"
+                issue_type = "Multiple Issues"
+        else:
+            result = "CORRECT"
+            issue_type = "Match Confirmed"
+            issues.append("Same product, same price - minor text differences ignored")
+
+        # Format displays
+        p1_display = self.format_product_display(product1)
+        p2_display = self.format_product_display(product2)
+
         return {
-            "correct_count": correct_count,
-            "incorrect_count": incorrect_count,
-            "total_count": len(comparison_rows)
+            f"{catalog1_name}_details": p1_display,
+            f"{catalog2_name}_details": p2_display,
+            "comparison_result": result,
+            "issue_type": issue_type,
+            "details": "; ".join(issues) if issues else "Products match",
+            "price_match": "YES" if not price_issue else "NO",
+            "brand_match": "YES" if brand_match else f"NO ({brand_score:.1f}%)",
+            "brand_similarity": f"{brand_score:.1f}%"
         }
 
     def format_product_display(self, product: Dict) -> str:
@@ -1494,7 +1575,7 @@ class PracticalCatalogComparator:
         return f"{brand} - {price_display} - {size}"
 
     def export_practical_comparison(self, comparison_result: Dict, output_path: str):
-        """Export practical comparison results with CORRECTED summary calculations"""
+        """Export practical comparison results"""
 
         # Create main comparison DataFrame
         df = pd.DataFrame(comparison_result["comparison_rows"])
@@ -1508,7 +1589,10 @@ class PracticalCatalogComparator:
             f"{catalog2_name}_details",
             "comparison_result",
             "issue_type",
-            "details"
+            "details",
+            "price_match",
+            "brand_match",
+            "brand_similarity"
         ]
 
         # Ensure all columns exist
@@ -1516,115 +1600,49 @@ class PracticalCatalogComparator:
             if col not in df.columns:
                 df[col] = "N/A"
 
-        # Only include columns that actually exist
-        existing_columns = [col for col in column_order if col in df.columns]
-        df = df.reindex(columns=existing_columns)
+        df = df.reindex(columns=column_order)
 
         # Rename columns
-        new_column_names = [
+        df.columns = [
             f"{catalog1_name} Details",
             f"{catalog2_name} Details",
             "Comparison Result",
             "Issue Type",
-            "Details"
+            "Details",
+            "Price Match",
+            "Brand Match",
+            "Brand Similarity %"
         ]
-        df.columns = new_column_names[:len(existing_columns)]
 
-        # CORRECTED SUMMARY CALCULATIONS
-        comparison_rows = comparison_result["comparison_rows"]
-        total_rows = len(comparison_rows)
-        
-        # Initialize counters
-        correct_matches = 0
-        incorrect_matches = 0
-        missing_products = 0
-        price_issues = 0
-        text_issues = 0
-        image_issues = 0
-        
-        # Process each comparison row (your existing logic)
-        for row in comparison_rows:
-            comparison_result_status = row.get("comparison_result", "")
-            issue_type = row.get("issue_type", "")
-            details = row.get("details", "")
-            granular_differences = row.get("granular_differences", [])
-            
-            if comparison_result_status == "CORRECT":
-                correct_matches += 1
-            elif comparison_result_status == "INCORRECT":
-                incorrect_matches += 1
-                
-                # Check for missing products
-                if "Missing Product" in issue_type or "missing" in details.lower():
-                    missing_products += 1
-                
-                # Count issue types from granular differences
-                if granular_differences:
-                    for diff in granular_differences:
-                        diff_type = diff.get("type", "").lower()
-                        if "price" in diff_type:
-                            price_issues += 1
-                        elif "text" in diff_type:
-                            text_issues += 1
-                        elif "image" in diff_type:
-                            image_issues += 1
-                else:
-                    # Fallback to issue_type field
-                    if "Missing Product" not in issue_type:
-                        issue_type_lower = issue_type.lower()
-                        if "price" in issue_type_lower:
-                            price_issues += 1
-                        if "text" in issue_type_lower:
-                            text_issues += 1
-                        if "image" in issue_type_lower:
-                            image_issues += 1
+        # Create practical summary
+        total_rows = len(comparison_result["comparison_rows"])
+        correct_matches = len([r for r in comparison_result["comparison_rows"] if r.get("comparison_result", "").startswith("CORRECT")])
+        price_issues = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Price Difference"])
+        different_products = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Different Product"])
+        missing_products = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Missing Product"])
 
-        # Calculate rates
-        match_rate = (correct_matches / max(total_rows, 1)) * 100
-        error_rate = (incorrect_matches / max(total_rows, 1)) * 100
-
-        # FORCE PRINT THE CORRECT VALUES - THIS WILL SHOW IN YOUR FRONTEND
-        print(f"\n🔍 SUMMARY VERIFICATION - THESE VALUES SHOULD APPEAR:")
-        print(f"📊 Total comparisons: {total_rows}")
-        print(f"✅ Correct matches: {correct_matches}")
-        print(f"❌ Incorrect matches: {incorrect_matches}")
-        print(f"💰 Price issues: {price_issues}")
-        print(f"📝 Text issues: {text_issues}")
-        print(f"🖼️ Image issues: {image_issues}")
-        print(f"❓ Missing products: {missing_products}")
-        print(f"📈 Match rate: {match_rate:.1f}%")
-        print(f"📉 Error rate: {error_rate:.1f}%")
-    
-
-        # FIXED SUMMARY DATA with correct calculations
         summary_data = {
             "Metric": [
                 "Total Comparisons",
-                "Correct Matches", 
-                "Incorrect Matches",
-                "Products with Issues",
-                "Price Issues Found",
-                "Text Issues Found", 
-                "Image Issues Found",
+                "Correct Matches",
+                "Price Issues",
+                "Different Products",
                 "Missing Products",
                 "Match Rate (%)",
-                "Error Rate (%)",
-                "Comparison Type",
-                "Focus"
+                "Price Tolerance Used",
+                "Brand Similarity Threshold",
+                "Comparison Focus"
             ],
             "Value": [
                 total_rows,
                 correct_matches,
-                incorrect_matches,
-                incorrect_matches,  # Products with issues = incorrect matches
                 price_issues,
-                text_issues,
-                image_issues,
+                different_products,
                 missing_products,
-                f"{match_rate:.1f}%",
-                f"{error_rate:.1f}%",
-                comparison_result['comparison_criteria'].get('comparison_type', 'Position-based'),
-                comparison_result['comparison_criteria'].get('focus', 'Quality Control')
+                f"{(correct_matches/max(total_rows,1)*100):.1f}%",
+                f"${comparison_result['comparison_criteria']['price_tolerance']}",
+                f"{comparison_result['comparison_criteria']['brand_similarity_threshold']}%",
+                comparison_result['comparison_criteria']['focus']
             ]
         }
         summary_df = pd.DataFrame(summary_data)
@@ -1632,375 +1650,21 @@ class PracticalCatalogComparator:
         # Export to Excel
         output_path = Path(output_path)
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Position_Comparison', index=False)
+            df.to_excel(writer, sheet_name='Practical_Comparison', index=False)
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
 
-        logger.info(f"Position-based comparison exported to {output_path}")
-        
-        # ENHANCED CONSOLE OUTPUT WITH DEBUGGING
-        print(f"\nPOSITION-BASED COMPARISON SUMMARY:")
+        logger.info(f"Practical comparison exported to {output_path}")
+        print(f"\nPRACTICAL COMPARISON SUMMARY:")
         print(f"Total comparisons: {total_rows}")
         print(f"Correct matches: {correct_matches}")
-        print(f"Incorrect matches: {incorrect_matches}")
-        print(f"Products with issues: {incorrect_matches}")
-        print(f"Price issues found: {price_issues}")
-        print(f"Text issues found: {text_issues}")
-        print(f"Image issues found: {image_issues}")
+        print(f"Price issues: {price_issues}")
+        print(f"Different products: {different_products}")
         print(f"Missing products: {missing_products}")
-        print(f"Match rate: {match_rate:.1f}%")
-        print(f"Error rate: {error_rate:.1f}%")
-        
-        # ENHANCED DEBUG LOGGING
-        logger.info(f"DETAILED SUMMARY CALCULATION DEBUG:")
-        logger.info(f"  Total rows processed: {total_rows}")
-        logger.info(f"  Rows with CORRECT status: {correct_matches}")
-        logger.info(f"  Rows with INCORRECT status: {incorrect_matches}")
-        logger.info(f"  Individual issue counts - Price: {price_issues}, Text: {text_issues}, Image: {image_issues}")
-        logger.info(f"  Missing products: {missing_products}")
-        
-        # Additional debugging: Show breakdown by row
-        for i, row in enumerate(comparison_rows):
-            result = row.get("comparison_result", "UNKNOWN")
-            if result == "INCORRECT":
-                issue_type = row.get("issue_type", "N/A")
-                granular_diffs = row.get("granular_differences", [])
-                logger.info(f"  Row {i+1}: {result} - {issue_type} - {len(granular_diffs)} granular differences")
-                for j, diff in enumerate(granular_diffs):
-                    diff_type = diff.get("type", "Unknown")
-                    logger.info(f"    Diff {j+1}: {diff_type}")
-            
-        return {
-            "total_comparisons": total_rows,
-            "correct_matches": correct_matches,
-            "incorrect_matches": incorrect_matches,
-            "price_issues": price_issues,
-            "text_issues": text_issues,
-            "image_issues": image_issues,
-            "missing_products": missing_products,
-            "match_rate": match_rate
-        }
-    def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
-        """
-        Enhanced VLM function with better bounding box detection guidance
-        """
-        
-        system_prompt = """
-        You are a quality control expert comparing two retail product images to find PRODUCTION ERRORS with precise locations.
-
-        TASK: Find obvious quality control issues and provide EXACT bounding box coordinates for each error.
-
-        ERROR TYPES TO DETECT:
-
-        1. **Price Errors**: 
-        - Significantly different prices (>$3 difference) for similar products
-        - Obviously incorrect prices ($0.00, $999.99, etc.)
-        - Missing price information
-        - Malformed price text
-
-        2. **Text Errors**:
-        - Spelling mistakes in product names (e.g., "clorox" vs "Clorox")
-        - Garbled or corrupted text (e.g., "Variedad 57 tandas 60 tandas")
-        - Missing or incomplete product descriptions
-        - Wrong product names for the shown image
-
-        3. **Image Errors**:
-        - Wrong product photos (completely different products)
-        - Corrupted, pixelated, or missing images
-        - Severely misaligned elements
-
-        IGNORE these normal variations:
-        - Different brands in same position (Tide vs Gain = normal)
-        - Different product categories (detergent vs paper towels = normal)
-        - Minor price differences (<$3)
-        - Different promotional banners
-        - Slight color/lighting variations
-
-        CRITICAL BOUNDING BOX INSTRUCTIONS:
-        
-        1. **For Price Errors**: Draw box around the ENTIRE price area including dollar sign and cents
-        - Example: For "$12.97" draw box covering the full price text
-        - Make box generous enough to include any price formatting
-        
-        2. **For Text Errors**: Draw box around the ENTIRE problematic text area
-        - Example: For misspelled "clorox" draw box covering the whole brand name area
-        - Include surrounding context if text is part of larger description
-        
-        3. **Box Size Guidelines**:
-        - Minimum box size: 60x30 pixels (width x height)
-        - For prices: typically 80-150 pixels wide, 30-50 pixels tall
-        - For product names: typically 100-250 pixels wide, 30-60 pixels tall
-        - For descriptions: can be 200-400 pixels wide, 40-80 pixels tall
-        
-        4. **Coordinate System**: Use absolute pixel coordinates within each image
-        - (0,0) is top-left corner of the image
-        - X increases going right, Y increases going down
-        - Typical product image size is 400-600 pixels wide, 400-800 pixels tall
-
-        RESPONSE FORMAT - Return this EXACT JSON structure:
-        {
-            "differences": [
-                {
-                    "type": "Price Error",
-                    "description": "Specific detailed description of the error",
-                    "box1": [x1, y1, x2, y2],
-                    "box2": [x1, y1, x2, y2]
-                }
-            ]
-        }
-
-        Where:
-        - box1 = coordinates in FIRST image [left, top, right, bottom]
-        - box2 = coordinates in SECOND image [left, top, right, bottom]
-        - Coordinates must be integers
-        - Ensure x2 > x1 and y2 > y1
-        - Make boxes large enough to clearly see the error area
-
-        EXAMPLES of good bounding boxes:
-        - Price "$12.47": [50, 20, 130, 55]
-        - Brand name "Clorox": [20, 100, 150, 135]  
-        - Product description line: [15, 200, 350, 240]
-
-        If no production errors found, return: {"differences": []}
-
-        Focus on OBVIOUS errors that clearly need fixing, not minor variations.
-        """
-        
-        try:
-            with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
-                b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
-                b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
-
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": system_prompt},
-                        {
-                            "type": "text", 
-                            "text": "FIRST IMAGE - Look for errors and provide box1 coordinates:"
-                        },
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
-                        {
-                            "type": "text", 
-                            "text": "SECOND IMAGE - Look for errors and provide box2 coordinates:"
-                        },
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
-                    ]
-                }
-            ]
-
-            response = self.openai_client.chat.completions.create(
-                model=self.vlm_model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_tokens=2000,  # Increased for detailed analysis
-                temperature=0.1   # Low temperature for consistent results
-            )
-
-            response_content = response.choices[0].message.content
-            logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
-            
-            differences_data = json.loads(response_content)
-            raw_differences = differences_data.get("differences", [])
-            
-            # Enhanced normalization with better bounding box validation
-            normalized_differences = []
-            
-            for i, diff in enumerate(raw_differences):
-                if not isinstance(diff, dict):
-                    logger.warning(f"ITEM_ID: {item_id_for_log} - Skipping non-dict difference at index {i}: {diff}")
-                    continue
-                
-                normalized_diff = {}
-                
-                # Handle type field
-                if "type" in diff:
-                    normalized_diff["type"] = diff["type"]
-                elif "issue" in diff:
-                    normalized_diff["type"] = diff["issue"]
-                elif "category" in diff:
-                    normalized_diff["type"] = diff["category"]
-                else:
-                    desc = str(diff.get("description", diff.get("details", "")))
-                    if "price" in desc.lower():
-                        normalized_diff["type"] = "Price Error"
-                    elif "text" in desc.lower() or "name" in desc.lower():
-                        normalized_diff["type"] = "Text Error"
-                    else:
-                        normalized_diff["type"] = "Unknown Error"
-                    logger.warning(f"ITEM_ID: {item_id_for_log} - No 'type' field found, inferred: {normalized_diff['type']}")
-                
-                # Handle description field
-                if "description" in diff:
-                    normalized_diff["description"] = diff["description"]
-                elif "details" in diff:
-                    normalized_diff["description"] = diff["details"]
-                elif "message" in diff:
-                    normalized_diff["description"] = diff["message"]
-                else:
-                    product = diff.get("product", "")
-                    issue = diff.get("issue", diff.get("type", ""))
-                    normalized_diff["description"] = f"{product}: {issue}" if product else str(issue)
-                
-                # Enhanced bounding box validation and normalization
-                box1 = diff.get("box1")
-                box2 = diff.get("box2")
-                
-                # Validate and potentially fix bounding boxes
-                if self._is_valid_bounding_box(box1):
-                    # Ensure minimum box size
-                    box1 = self._ensure_minimum_box_size(box1)
-                    normalized_diff["box1"] = box1
-                    logger.info(f"ITEM_ID: {item_id_for_log} - Valid box1 found: {box1}")
-                else:
-                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid box1: {box1}")
-                    # Try to create a reasonable default box
-                    normalized_diff["box1"] = self._create_default_box(normalized_diff["type"])
-                    logger.info(f"ITEM_ID: {item_id_for_log} - Using default box1: {normalized_diff['box1']}")
-                
-                if self._is_valid_bounding_box(box2):
-                    box2 = self._ensure_minimum_box_size(box2)
-                    normalized_diff["box2"] = box2
-                    logger.info(f"ITEM_ID: {item_id_for_log} - Valid box2 found: {box2}")
-                else:
-                    logger.warning(f"ITEM_ID: {item_id_for_log} - Invalid box2: {box2}")
-                    # Try to create a reasonable default box
-                    normalized_diff["box2"] = self._create_default_box(normalized_diff["type"])
-                    logger.info(f"ITEM_ID: {item_id_for_log} - Using default box2: {normalized_diff['box2']}")
-                
-                # Copy over any other fields
-                for key, value in diff.items():
-                    if key not in ["type", "description", "details", "issue", "message", "box1", "box2"]:
-                        normalized_diff[key] = value
-                
-                normalized_differences.append(normalized_diff)
-                
-                # Enhanced logging
-                has_boxes = normalized_diff.get("box1") and normalized_diff.get("box2")
-                box1_size = self._get_box_size(normalized_diff.get("box1"))
-                box2_size = self._get_box_size(normalized_diff.get("box2"))
-                
-                logger.info(f"ITEM_ID: {item_id_for_log} - Normalized Diff {i}: "
-                        f"Type='{normalized_diff['type']}', "
-                        f"Desc='{normalized_diff.get('description', 'N/A')[:50]}...', "
-                        f"HasBoxes={has_boxes}, "
-                        f"Box1Size={box1_size}, Box2Size={box2_size}")
-            
-            logger.info(f"ITEM_ID: {item_id_for_log} - Successfully processed {len(normalized_differences)} differences")
-            return normalized_differences
-
-        except json.JSONDecodeError as e:
-            logger.error(f"ITEM_ID: {item_id_for_log} - JSON parsing error: {e}")
-            logger.error(f"ITEM_ID: {item_id_for_log} - Raw response: {response_content}")
-            return []
-        except Exception as e:
-            logger.error(f"ITEM_ID: {item_id_for_log} - VLM comparison error: {e}")
-            return []
-
-    def _is_valid_bounding_box(self, box) -> bool:
-        """Validate bounding box format and dimensions"""
-        if not isinstance(box, list) or len(box) != 4:
-            return False
-        
-        try:
-            x1, y1, x2, y2 = [float(coord) for coord in box]
-            
-            # Basic validation: x2 > x1 and y2 > y1
-            if x2 <= x1 or y2 <= y1:
-                return False
-            
-            # Reasonable coordinate ranges (assuming reasonable image sizes)
-            if any(coord < 0 or coord > 2000 for coord in [x1, y1, x2, y2]):
-                return False
-            
-            # Minimum size requirement
-            width = x2 - x1
-            height = y2 - y1
-            if width < 20 or height < 15:  # Too small to be useful
-                return False
-            
-            return True
-        
-        except (ValueError, TypeError):
-            return False
-
-    def _ensure_minimum_box_size(self, box, min_width=60, min_height=30):
-        """Ensure bounding box meets minimum size requirements"""
-        if not box:
-            return box
-        
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-        
-        # Expand box if too small
-        if width < min_width:
-            expand_x = (min_width - width) / 2
-            x1 = max(0, x1 - expand_x)
-            x2 = x1 + min_width
-        
-        if height < min_height:
-            expand_y = (min_height - height) / 2
-            y1 = max(0, y1 - expand_y)
-            y2 = y1 + min_height
-        
-        return [int(x1), int(y1), int(x2), int(y2)]
-
-    def _create_default_box(self, error_type):
-        """Create a reasonable default bounding box based on error type"""
-        if "price" in error_type.lower():
-            # Price area typically in upper right
-            return [300, 20, 450, 60]
-        elif "text" in error_type.lower():
-            # Text area typically in center/left
-            return [50, 150, 300, 200]
-        else:
-            # Generic center box
-            return [100, 100, 300, 200]
-
-    def _get_box_size(self, box):
-        """Get readable box size description"""
-        if not box or len(box) != 4:
-            return "Invalid"
-        
-        width = box[2] - box[0]
-        height = box[3] - box[1]
-        return f"{width}x{height}"
-        
-    def _is_valid_bounding_box(self, box) -> bool:
-        """
-        Validate that a bounding box has the correct format [x1, y1, x2, y2]
-        """
-        if not isinstance(box, list):
-            return False
-        
-        if len(box) != 4:
-            return False
-        
-        try:
-            x1, y1, x2, y2 = [float(coord) for coord in box]
-            
-            # Basic validation: x2 > x1 and y2 > y1
-            if x2 <= x1 or y2 <= y1:
-                return False
-            
-            # Reasonable coordinate ranges (assuming images are reasonably sized)
-            if any(coord < 0 or coord > 5000 for coord in [x1, y1, x2, y2]):
-                return False
-            
-            return True
-        
-        except (ValueError, TypeError):
-            return False    
-        
-# Add this to your main_vlm_comparison function RIGHT BEFORE the export call:
-
-# In SCRIPT 3
-# Replace the ENTIRE main_vlm_comparison function with this one:
+        print(f"Match rate: {(correct_matches/max(total_rows,1)*100):.1f}%")
 
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
-                        catalog1_name: str = None, catalog2_name: str = None,
-                        output_path: str = None, price_tolerance: float = 0.01):
+                       catalog1_name: str = None, catalog2_name: str = None,
+                       output_path: str = None, price_tolerance: float = 0.01):
     """Main function for practical catalog comparison"""
 
     if not openai_api_key:
@@ -2024,37 +1688,19 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
             catalog2_name
         )
 
-        # Export results to get the summary
-        try:
-            print(f"\n🔄 CALLING EXPORT FUNCTION to generate summary...")
-            # This function calculates the summary counts and saves the Excel file
-            export_summary = comparator.export_practical_comparison(results, output_path)
-            
-            # FIXED: Merge the calculated summary into the main results dictionary
-            results['summary_counts'] = export_summary
-            
-            print(f"\n🎯 EXPORT SUMMARY VERIFICATION:")
-            print(f"Export function returned summary: {export_summary}")
-            
-        except Exception as e:
-            print(f"\n❌ EXPORT ERROR: {e}")
-            import traceback
-            traceback.print_exc()
-            results['summary_counts'] = None # Ensure the key exists even on error
+        # Export results
+        comparator.export_practical_comparison(results, output_path)
 
-        print(f"\n✅ PRACTICAL RESULTS SAVED TO: {output_path}")
-        return results # Return the combined results object
+        print(f"PRACTICAL RESULTS SAVED TO: {output_path}")
+        return results
 
     except Exception as e:
         logger.error(f"Error in practical comparison: {e}")
         raise
- 
+
 # ========================================
 # STREAMLINED CATALOG COMPARISON PIPELINE
 # ========================================
-
-# In SCRIPT 4
-# Replace the ENTIRE catalog_comparison_pipeline function with this one:
 
 def catalog_comparison_pipeline(
     pdf_path1: str,
@@ -2075,15 +1721,43 @@ def catalog_comparison_pipeline(
     dry_run: bool = False
 ):
     """
-    Complete catalog comparison pipeline with FIXED summary aggregation.
+    Complete catalog comparison pipeline that processes two PDFs and template images.
+
+    Args:
+        pdf_path1: Path to first PDF catalog
+        pdf_path2: Path to second PDF catalog
+        template1_path: Path to first template image for filtering
+        template2_path: Path to second template image for filtering
+        template3_path: Path to third template image for filtering
+        roboflow_api_key: Roboflow API key for object detection
+        roboflow_project_name: Roboflow project name
+        roboflow_version: Roboflow model version
+        openai_api_key: OpenAI API key for VLM analysis
+        output_directory: Base output directory for all results
+        confidence_threshold: Detection confidence threshold (default: 25)
+        similarity_threshold: Image similarity threshold for template matching (default: 0.55)
+        price_tolerance: Price difference tolerance for comparison (default: 0.01)
+        ranking_method: Ranking algorithm to use (default: "improved_grid")
+        comparison_method: Image comparison method (default: "structural")
+        dry_run: If True, show what would be done without executing (default: False)
+
+    Returns:
+        Dictionary containing all pipeline results and file paths
     """
-    # ... (the beginning of the function is the same, no changes needed there) ...
-    # Keep everything from the start of the function down to the VLM comparison loop
 
     print("=" * 80)
     print("CATALOG COMPARISON PIPELINE - COMPLETE AUTOMATION")
     print("=" * 80)
-    # ... (print statements remain the same) ...
+    print(f"PDF 1: {Path(pdf_path1).name}")
+    print(f"PDF 2: {Path(pdf_path2).name}")
+    print(f"Templates: {Path(template1_path).name}, {Path(template2_path).name}, {Path(template3_path).name}")
+    print(f"Output Directory: {output_directory}")
+    print(f"Detection Confidence: {confidence_threshold}%")
+    print(f"Similarity Threshold: {similarity_threshold}")
+    print(f"Price Tolerance: ${price_tolerance}")
+    print(f"Poppler Path: {get_poppler_path() if get_poppler_path() else 'System PATH'}")
+    print(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
+    print("=" * 80)
 
     pipeline_results = {
         "step1_pdf_processing": None,
@@ -2113,7 +1787,9 @@ def catalog_comparison_pipeline(
             pipeline_results["errors"].append(error_msg)
             raise Exception(error_msg)
 
+        # Process PDFs
         pdf_output_dir = os.path.join(output_directory, "01_pdf_processing")
+
         pdf_results = main_dual_pdf_processing(
             pdf_path1=pdf_path1,
             pdf_path2=pdf_path2,
@@ -2122,41 +1798,64 @@ def catalog_comparison_pipeline(
             ranking_method=ranking_method,
             confidence_threshold=confidence_threshold
         )
+
         pipeline_results["step1_pdf_processing"] = pdf_results
-        print(f"PDF processing complete: Catalog 1: {pdf_results['total_products_catalog1']} products, Catalog 2: {pdf_results['total_products_catalog2']} products")
+        print(f"PDF processing complete:")
+        print(f"Catalog 1: {pdf_results['total_products_catalog1']} products")
+        print(f"Catalog 2: {pdf_results['total_products_catalog2']} products")
 
         # ==============================
         # STEP 2: TEMPLATE-BASED FILTERING
         # ==============================
         print("\n🧹 STEP 2: TEMPLATE-BASED IMAGE FILTERING")
         print("-" * 50)
-        
+
         template_results = {}
+
+        # Process each page in both catalogs
         catalog1_path = Path(pdf_results["catalog1_path"])
         catalog2_path = Path(pdf_results["catalog2_path"])
-        catalog1_pages = sorted([d for d in catalog1_path.iterdir() if d.is_dir() and d.name.startswith("page_")], key=lambda p: int(p.name.split('_')[-1]))
-        catalog2_pages = sorted([d for d in catalog2_path.iterdir() if d.is_dir() and d.name.startswith("page_")], key=lambda p: int(p.name.split('_')[-1]))
-        
+
+        # Find all page folders
+        catalog1_pages = [d for d in catalog1_path.iterdir() if d.is_dir() and d.name.startswith("page_")]
+        catalog2_pages = [d for d in catalog2_path.iterdir() if d.is_dir() and d.name.startswith("page_")]
+
         all_page_pairs = []
         max_pages = max(len(catalog1_pages), len(catalog2_pages))
+
         for i in range(max_pages):
             folder1 = str(catalog1_pages[i]) if i < len(catalog1_pages) else None
             folder2 = str(catalog2_pages[i]) if i < len(catalog2_pages) else None
             if folder1 or folder2:
                 all_page_pairs.append((folder1, folder2))
-        
-        print(f"Found {len(all_page_pairs)} page pairs to process for template filtering.")
-        # ... (The template filtering loop can remain the same) ...
+
+        print(f"Found {len(all_page_pairs)} page pairs to process")
+
         for page_idx, (folder1, folder2) in enumerate(all_page_pairs, 1):
-            # ... this whole loop is unchanged ...
+            print(f"\nProcessing Page {page_idx}...")
+
             if folder1 and folder2:
                 try:
-                    process_folders_with_image_templates(template1_path, template2_path, template3_path, folder1, folder2, similarity_threshold, comparison_method, dry_run)
+                    process_folders_with_image_templates(
+                        template1_path=template1_path,
+                        template2_path=template2_path,
+                        template3_path=template3_path,
+                        folder1_path=folder1,
+                        folder2_path=folder2,
+                        similarity_threshold=similarity_threshold,
+                        comparison_method=comparison_method,
+                        dry_run=dry_run
+                    )
                     template_results[f"page_{page_idx}"] = "Processed successfully"
+                    print(f"Page {page_idx} template filtering complete")
+
                 except Exception as e:
                     error_msg = f"Template filtering failed for page {page_idx}: {e}"
                     template_results[f"page_{page_idx}"] = error_msg
                     pipeline_results["errors"].append(error_msg)
+                    print(f"{error_msg}")
+            else:
+                print(f"Skipping page {page_idx} - missing folder(s)")
 
         pipeline_results["step2_template_filtering"] = template_results
 
@@ -2165,106 +1864,271 @@ def catalog_comparison_pipeline(
         # ==============================
         print("\nSTEP 3: VLM-BASED CATALOG COMPARISON")
         print("-" * 50)
+
         comparison_results = {}
+
+        # Compare each page pair using VLM
         for page_idx, (folder1, folder2) in enumerate(all_page_pairs, 1):
             if folder1 and folder2 and os.path.exists(folder1) and os.path.exists(folder2):
-                print(f"\nAnalyzing Page {page_idx} with VLM...")
+                print(f"\n Analyzing Page {page_idx} with VLM...")
+
                 try:
+                    # Create output path for this page comparison
                     page_output_path = os.path.join(output_directory, "03_vlm_comparison", f"page_{page_idx}_comparison.xlsx")
                     os.makedirs(os.path.dirname(page_output_path), exist_ok=True)
-                    vlm_results_for_page = main_vlm_comparison(
+
+                    vlm_results = main_vlm_comparison(
                         openai_api_key=openai_api_key,
-                        folder1_path=folder1, folder2_path=folder2,
-                        catalog1_name=f"Catalog1_Page{page_idx}", catalog2_name=f"Catalog2_Page{page_idx}",
-                        output_path=page_output_path, price_tolerance=price_tolerance
+                        folder1_path=folder1,
+                        folder2_path=folder2,
+                        catalog1_name=f"Catalog1_Page{page_idx}",
+                        catalog2_name=f"Catalog2_Page{page_idx}",
+                        output_path=page_output_path,
+                        price_tolerance=price_tolerance
                     )
+
                     comparison_results[f"page_{page_idx}"] = {
-                        "results": vlm_results_for_page, "output_path": page_output_path
+                        "results": vlm_results,
+                        "output_path": page_output_path
                     }
+                    print(f"Page {page_idx} VLM comparison complete")
+
                 except Exception as e:
-                    # ... error handling ...
                     error_msg = f"VLM comparison failed for page {page_idx}: {e}"
                     comparison_results[f"page_{page_idx}"] = {"error": error_msg}
                     pipeline_results["errors"].append(error_msg)
-        
+                    print(f"{error_msg}")
+            else:
+                print(f"Skipping VLM comparison for page {page_idx} - missing folders")
+
         pipeline_results["step3_vlm_comparison"] = comparison_results
 
-        # ==============================
-        # STEP 4: VISUALIZATION & SUMMARY (RE-IMPLEMENTED)
-        # ==============================
-        print("\nSTEP 4: GENERATING VISUALIZATIONS & AGGREGATING SUMMARY")
-        print("-" * 50)
 
-        # --- AGGREGATE FINAL SUMMARY COUNTS (THE CRITICAL FIX) ---
-        final_summary_counts = {
-            "total_comparisons": 0, "correct_matches": 0, "incorrect_matches": 0,
-            "price_issues": 0, "text_issues": 0, "image_issues": 0, "missing_products": 0
-        }
-        
-        for page_id, vlm_data in comparison_results.items():
-            if "results" in vlm_data and "summary_counts" in vlm_data["results"]:
-                page_summary = vlm_data["results"]["summary_counts"]
-                if page_summary: # Check if summary is not None
-                    for key in final_summary_counts:
-                        final_summary_counts[key] += page_summary.get(key, 0)
-        
-        # Add aggregated summary to the main results object for the frontend
-        pipeline_results["final_summary_counts"] = final_summary_counts
-        logger.info(f"Final aggregated summary counts: {final_summary_counts}")
+        if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"]:
+            vlm_all_pages_data = pipeline_results["step3_vlm_comparison"]
+            logger.info("Updating visualizations with VLM comparison results...")
 
-        # --- UPDATE VISUALIZATIONS ---
-        # (This part of the original function can now run with the aggregated data available)
-        if pdf_results and "step3_vlm_comparison" in pipeline_results:
-            logger.info("Updating all page visualizations with VLM results...")
-            for page_id_key, page_vlm_data in pipeline_results["step3_vlm_comparison"].items():
-                # ... visualization logic ...
-                # (This loop remains largely the same, as it processes page by page)
+            # Iterate through each page's VLM results
+            for page_id_key, page_vlm_data in vlm_all_pages_data.items(): # e.g., page_id_key = "page_1"
                 if "error" in page_vlm_data or "results" not in page_vlm_data:
+                    logger.warning(f"Skipping VLM viz update for {page_id_key} due to error or missing results.")
                     continue
+
                 vlm_results_for_page = page_vlm_data["results"]
-                page_num_match = re.search(r'(\d+)', page_id_key)
-                if not page_num_match: continue
+                page_num_match = re.search(r'(\d+)', page_id_key) # Get page number
+                if not page_num_match:
+                    logger.warning(f"Could not extract page number from VLM result key: {page_id_key}")
+                    continue
                 page_num = int(page_num_match.group(1))
+
                 comparison_rows = vlm_results_for_page.get("comparison_rows", [])
                 
-                # Create issue details dict for visualization function
-                issue_details_per_rank = {
-                    idx + 1: row.get("granular_differences", [])
-                    for idx, row in enumerate(comparison_rows)
-                    if row.get("comparison_result") == "INCORRECT" and row.get("granular_differences")
-                }
-                
-                # Update viz for Catalog 1
-                if page_num in pdf_results.get("page_level_data_catalog1", {}):
+                # Determine issue ranks for catalog 1 and catalog 2 for the current page
+                issue_ranks_cat1 = set()
+                issue_ranks_cat2 = set()
+
+                # The comparison_rows are generated by iterating ranks from 1 to max_rank.
+                # So, the index of the row + 1 gives the rank on the page.
+                for rank_idx, row_data in enumerate(comparison_rows):
+                    current_rank_on_page = rank_idx + 1 
+                    
+                    comparison_status = row_data.get("comparison_result", "")
+                    issue_type = row_data.get("issue_type", "")
+                    details = row_data.get("details", "")
+                    
+                    # Catalog names as used in VLM results (e.g., "Catalog1_Page1")
+                    vlm_cat1_name = vlm_results_for_page.get("catalog1_name", "File1") 
+                    vlm_cat2_name = vlm_results_for_page.get("catalog2_name", "File2")
+
+                    # Check if product from catalog 1 was part of this row's comparison
+                    # (i.e., not reported as "Product Missing" for catalog 1 in this specific row)
+                    product1_in_row_details = row_data.get(f"{vlm_cat1_name}_details", "")
+                    is_product1_present_in_row = not ("Product Missing" in product1_in_row_details if isinstance(product1_in_row_details, str) else True)
+
+                    product2_in_row_details = row_data.get(f"{vlm_cat2_name}_details", "")
+                    is_product2_present_in_row = not ("Product Missing" in product2_in_row_details if isinstance(product2_in_row_details, str) else True)
+
+                    if comparison_status.startswith("INCORRECT"):
+                        # --- START: CORRECTED LOGIC ---
+                        if issue_type == "Missing Product":
+                            # Check if the error message says it's missing in Catalog 2
+                            if "missing in " + vlm_cat2_name in details:
+                                # If Cat 2 is missing, highlight the product that exists in Cat 1.
+                                issue_ranks_cat1.add(current_rank_on_page)
+                            # Check if the error message says it's missing in Catalog 1
+                            elif "missing in " + vlm_cat1_name in details:
+                                # If Cat 1 is missing, highlight the product that exists in Cat 2.
+                                issue_ranks_cat2.add(current_rank_on_page)
+                        
+                        # This part was already correct. It handles issues where both products exist but are different.
+                        elif issue_type in ["Different Product", "Price Difference", "Multiple Issues"]:
+                            issue_ranks_cat1.add(current_rank_on_page)
+                            issue_ranks_cat2.add(current_rank_on_page)
+
+
+                # Regenerate visualization for Catalog 1, Page `page_num`
+                if pdf_results and page_num in pdf_results.get("page_level_data_catalog1", {}):
                     page_info_c1 = pdf_results["page_level_data_catalog1"][page_num]
-                    viz_path_c1 = Path(page_info_c1['page_folder_path']) / f"c1_p{page_num}_ranking_visualization.jpg"
-                    create_ranking_visualization(
-                        pil_img=page_info_c1['image_pil'], boxes=page_info_c1['ranked_boxes'],
-                        output_path=str(viz_path_c1), issue_details_per_rank=issue_details_per_rank
-                    )
-                
-                # Update viz for Catalog 2
-                if page_num in pdf_results.get("page_level_data_catalog2", {}):
+                    pil_img_c1 = page_info_c1.get('image_pil')
+                    ranked_boxes_c1 = page_info_c1.get('ranked_boxes')
+                    # Path where cropped images (and thus visualizations) for this page are stored
+                    page_folder_c1 = Path(page_info_c1.get('page_folder_path')) 
+                    
+                    if pil_img_c1 and ranked_boxes_c1 and page_folder_c1.exists():
+                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
+                        viz_output_path_c1 = page_folder_c1 / viz_filename_c1
+                        create_ranking_visualization(
+                            pil_img=pil_img_c1,
+                            boxes=ranked_boxes_c1,
+                            output_path=str(viz_output_path_c1),
+                            issue_product_ranks=issue_ranks_cat1 # Pass the identified issue ranks
+                        )
+                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
+                    else:
+                        logger.warning(f"Could not update viz for Cat1 Page {page_num}, missing PIL/boxes or folder path.")
+
+                # Regenerate visualization for Catalog 2, Page `page_num`
+                if pdf_results and page_num in pdf_results.get("page_level_data_catalog2", {}):
                     page_info_c2 = pdf_results["page_level_data_catalog2"][page_num]
-                    viz_path_c2 = Path(page_info_c2['page_folder_path']) / f"c2_p{page_num}_ranking_visualization.jpg"
-                    create_ranking_visualization(
-                        pil_img=page_info_c2['image_pil'], boxes=page_info_c2['ranked_boxes'],
-                        output_path=str(viz_path_c2), issue_details_per_rank=issue_details_per_rank
-                    )
-        
-        # --- CONSOLIDATE FINAL REPORT ---
-        # (The rest of the function for creating the final Excel report remains the same)
-        print("\nSTEP 5: CONSOLIDATING FINAL REPORT")
+                    pil_img_c2 = page_info_c2.get('image_pil')
+                    ranked_boxes_c2 = page_info_c2.get('ranked_boxes')
+                    page_folder_c2 = Path(page_info_c2.get('page_folder_path'))
+
+                    if pil_img_c2 and ranked_boxes_c2 and page_folder_c2.exists():
+                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
+                        viz_output_path_c2 = page_folder_c2 / viz_filename_c2
+                        create_ranking_visualization(
+                            pil_img=pil_img_c2,
+                            boxes=ranked_boxes_c2,
+                            output_path=str(viz_output_path_c2),
+                            issue_product_ranks=issue_ranks_cat2 # Pass the identified issue ranks
+                        )
+                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
+                    else:
+                        logger.warning(f"Could not update viz for Cat2 Page {page_num}, missing PIL/boxes or folder path.")
+        else:
+            logger.info("No VLM comparison results found or step3_vlm_comparison is empty. Visualizations will not be updated with VLM issues.")
+
+        # ==============================
+        # STEP 4: CONSOLIDATE RESULTS
+        # ==============================
+        print("\nSTEP 4: CONSOLIDATING FINAL RESULTS")
         print("-" * 50)
-        # ... the rest of the function creating the summary excel file is unchanged ...
+
+        # Create final summary
+        total_catalog1_products = sum([
+            results["results"]["catalog1_total_products"]
+            for results in comparison_results.values()
+            if "results" in results and "catalog1_total_products" in results["results"]
+        ])
+
+        total_catalog2_products = sum([
+            results["results"]["catalog2_total_products"]
+            for results in comparison_results.values()
+            if "results" in results and "catalog2_total_products" in results["results"]
+        ])
+
+        total_comparisons = sum([
+            len(results["results"]["comparison_rows"])
+            for results in comparison_results.values()
+            if "results" in results and "comparison_rows" in results["results"]
+        ])
+
+        # Create consolidated summary file
+        final_output_path = os.path.join(output_directory, "FINAL_COMPARISON_SUMMARY.xlsx")
+
+        summary_data = {
+            "Metric": [
+                "Pipeline Execution Mode",
+                "Total Pages Processed",
+                "PDF 1 Total Products",
+                "PDF 2 Total Products",
+                "Total Comparisons Made",
+                "Template Filtering Applied",
+                "VLM Analysis Applied",
+                "Detection Confidence Used",
+                "Similarity Threshold Used",
+                "Price Tolerance Used",
+                "Ranking Method Used",
+                "Comparison Method Used",
+                "Poppler Path Used",
+                "Total Errors Encountered"
+            ],
+            "Value": [
+                "DRY RUN" if dry_run else "EXECUTED",
+                len(all_page_pairs),
+                total_catalog1_products,
+                total_catalog2_products,
+                total_comparisons,
+                "Yes" if template_results else "No",
+                "Yes" if comparison_results else "No",
+                f"{confidence_threshold}%",
+                f"{similarity_threshold}",
+                f"${price_tolerance}",
+                ranking_method,
+                comparison_method,
+                get_poppler_path() if get_poppler_path() else "System PATH",
+                len(pipeline_results["errors"])
+            ]
+        }
+
+        summary_df = pd.DataFrame(summary_data)
+
+        # Create file list
+        output_files = []
+        for page_results in comparison_results.values():
+            if "output_path" in page_results:
+                output_files.append(page_results["output_path"])
+
+        files_data = {
+            "Output File": output_files,
+            "Description": [f"VLM comparison results for {Path(f).stem}" for f in output_files]
+        }
+        files_df = pd.DataFrame(files_data)
+
+        # Export consolidated summary
+        with pd.ExcelWriter(final_output_path, engine='openpyxl') as writer:
+            summary_df.to_excel(writer, sheet_name='Pipeline_Summary', index=False)
+            files_df.to_excel(writer, sheet_name='Output_Files', index=False)
+
+            # Add errors sheet if any
+            if pipeline_results["errors"]:
+                errors_df = pd.DataFrame({"Errors": pipeline_results["errors"]})
+                errors_df.to_excel(writer, sheet_name='Errors', index=False)
+
+        pipeline_results["final_output_path"] = final_output_path
+        pipeline_results["pipeline_summary"] = summary_data
+
+        print(f"Pipeline consolidation complete")
+        print(f"Final summary saved to: {final_output_path}")
+
+        # ==============================
+        # FINAL PIPELINE SUMMARY
+        # ==============================
+        print("\n" + "=" * 80)
+        print("CATALOG COMPARISON PIPELINE COMPLETE")
+        print("=" * 80)
+        print(f"FINAL RESULTS:")
+        print(f"Pages Processed: {len(all_page_pairs)}")
+        print(f"Total Products Catalog 1: {total_catalog1_products}")
+        print(f"Total Products Catalog 2: {total_catalog2_products}")
+        print(f"Total Comparisons: {total_comparisons}")
+        print(f"Errors Encountered: {len(pipeline_results['errors'])}")
+        print(f"Output Directory: {output_directory}")
+        print(f"Final Summary: {final_output_path}")
+        print(f"Poppler Used: {get_poppler_path() if get_poppler_path() else 'System PATH'}")
+
+        if pipeline_results["errors"]:
+            print(f"\nERRORS ENCOUNTERED:")
+            for i, error in enumerate(pipeline_results["errors"], 1):
+                print(f"   {i}. {error}")
 
         print("\nPipeline executed successfully!")
         return pipeline_results
 
     except Exception as e:
-        error_msg = f"Pipeline failed catastrophically: {e}"
+        error_msg = f"Pipeline failed: {e}"
         pipeline_results["errors"].append(error_msg)
-        logger.error(error_msg, exc_info=True)
         print(f"\n PIPELINE FAILED: {error_msg}")
         raise
 
