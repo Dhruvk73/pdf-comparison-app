@@ -292,6 +292,9 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # Replace the ENTIRE create_ranking_visualization function with this one:
 
+# In SCRIPT 1
+# Replace the ENTIRE create_ranking_visualization function with this one:
+
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
     Creates a visualization with PROMINENT red boxes for specific error areas and yellow outlines for products with issues.
@@ -371,7 +374,7 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             # Process each specific difference within this product
             for diff_idx, diff in enumerate(differences):
                 diff_type = diff.get("type", "Unknown")
-                diff_box_coords = diff.get("box1")  # Use box1 for first catalog
+                diff_box_coords = diff.get("box1")  # Use box1 for the first catalog's visualization
                 
                 logger.info(f"Processing difference {diff_idx} for rank {rank}: type={diff_type}, box={diff_box_coords}")
                 
@@ -385,30 +388,24 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                     continue
 
                 try:
-                    # FIXED: Better coordinate handling
+                    # FIXED: Correct coordinate handling by accounting for padding
                     x1, y1, x2, y2 = [float(coord) for coord in diff_box_coords]
                     
-                    # SIMPLIFIED: Always treat as product-relative coordinates for better accuracy
-                    product_width = product_box_coords[2] - product_box_coords[0]
-                    product_height = product_box_coords[3] - product_box_coords[1]
+                    # The padding used during the crop in extract_ranked_boxes_from_image
+                    CROP_PADDING = 10 
                     
-                    # Check if coordinates are relative (0-1)
-                    if all(0 <= coord <= 1 for coord in [x1, y1, x2, y2]):
-                        # Relative coordinates - convert to absolute within the product box
-                        abs_x1 = product_box_coords[0] + (x1 * product_width)
-                        abs_y1 = product_box_coords[1] + (y1 * product_height)
-                        abs_x2 = product_box_coords[0] + (x2 * product_width)
-                        abs_y2 = product_box_coords[1] + (y2 * product_height)
-                        abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
-                        logger.info(f"Converted relative coords {diff_box_coords} to absolute {abs_box}")
-                    else:
-                        # ALWAYS treat as product-relative coordinates for consistency
-                        abs_x1 = product_box_coords[0] + x1
-                        abs_y1 = product_box_coords[1] + y1
-                        abs_x2 = product_box_coords[0] + x2
-                        abs_y2 = product_box_coords[1] + y2
-                        abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
-                        logger.info(f"Treated as product-relative coords: {diff_box_coords} -> {abs_box}")
+                    # Calculate the top-left of the PADDED crop area, not the original box
+                    padded_product_left = product_box_coords[0] - CROP_PADDING
+                    padded_product_top = product_box_coords[1] - CROP_PADDING
+
+                    # Convert VLM-relative coords to full-page absolute coords
+                    abs_x1 = padded_product_left + x1
+                    abs_y1 = padded_product_top + y1
+                    abs_x2 = padded_product_left + x2
+                    abs_y2 = padded_product_top + y2
+                    
+                    abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
+                    logger.info(f"FIXED: Converted VLM-relative coords {diff_box_coords} to absolute {abs_box} using padding={CROP_PADDING}")
                     
                     # EXPANDED error box for better visibility
                     expansion = 25  # Increased expansion
@@ -457,14 +454,19 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                         label_x = abs_box[0]
                         label_y = max(80, abs_box[1] - 100)  # More space above
                         
-                        # FIXED: Calculate text size properly
+                        # FIXED: Calculate text size properly with a better fallback
                         try:
+                            # Use textbbox if available (more accurate)
                             text_bbox = draw.textbbox((label_x, label_y), label_text, font=label_font)
                             text_width = text_bbox[2] - text_bbox[0]
                             text_height = text_bbox[3] - text_bbox[1]
-                        except:
-                            # Fallback text size estimation
-                            text_width = len(label_text) * 35  # Bigger estimation
+                            # Ensure minimum size even if font is tiny
+                            if text_width < 100 or text_height < 40:
+                                raise ValueError("Fallback to manual sizing")
+                        except (TypeError, ValueError):
+                            # Fallback text size estimation for default font
+                            logger.warning("Using fallback for text size calculation.")
+                            text_width = len(label_text) * 40  # Bigger estimation
                             text_height = 60
                         
                         # Ensure label fits within image bounds
@@ -483,7 +485,7 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                         
                         # BLACK text on yellow background for maximum readability
                         draw.text((label_x, label_y), label_text, fill=(0, 0, 0), font=label_font, 
-                                 stroke_width=2, stroke_fill=(255, 255, 255))  # White stroke around black text
+                                  stroke_width=2, stroke_fill=(255, 255, 255))  # White stroke around black text
                         
                         final_width = abs_box[2] - abs_box[0]
                         final_height = abs_box[3] - abs_box[1]
@@ -503,10 +505,8 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
 
     # ADDED: Debug information about image and text
     logger.info(f"Image dimensions: {img_copy.width}x{img_copy.height}")
-    logger.info(f"Font used: {type(font)} at size 60")
-    logger.info(f"Label font used: {type(label_font)} at size 50")
-
-    
+    logger.info(f"Font used: {font.getname() if hasattr(font, 'getname') else 'Default'}")
+    logger.info(f"Label font used: {label_font.getname() if hasattr(label_font, 'getname') else 'Default'}")
 
 def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
@@ -2220,9 +2220,12 @@ class PracticalCatalogComparator:
         
 # Add this to your main_vlm_comparison function RIGHT BEFORE the export call:
 
+# In SCRIPT 3
+# Replace the ENTIRE main_vlm_comparison function with this one:
+
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
-                       catalog1_name: str = None, catalog2_name: str = None,
-                       output_path: str = None, price_tolerance: float = 0.01):
+                        catalog1_name: str = None, catalog2_name: str = None,
+                        output_path: str = None, price_tolerance: float = 0.01):
     """Main function for practical catalog comparison"""
 
     if not openai_api_key:
@@ -2246,89 +2249,30 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
             catalog2_name
         )
 
-        # DEBUG SECTION BEFORE EXPORT:
-        print("\n" + "="*80)
-        print("🔍 PRE-EXPORT DEBUGGING - DETAILED ANALYSIS")
-        print("="*80)
-        
-        comparison_rows = results.get("comparison_rows", [])
-        print(f"📋 Total comparison rows: {len(comparison_rows)}")
-        
-        # Count manually to verify
-        manual_correct = 0
-        manual_incorrect = 0
-        manual_price = 0
-        manual_text = 0
-        manual_missing = 0
-        
-        print(f"\n📊 ANALYZING EACH ROW:")
-        for i, row in enumerate(comparison_rows, 1):
-            result = row.get("comparison_result", "UNKNOWN")
-            issue_type = row.get("issue_type", "")
-            details = row.get("details", "")
-            granular_diffs = row.get("granular_differences", [])
-            
-            if result == "CORRECT":
-                manual_correct += 1
-            elif result == "INCORRECT":
-                manual_incorrect += 1
-                
-                # Check for missing products
-                if "Missing Product" in issue_type or "missing" in details.lower():
-                    manual_missing += 1
-                    print(f"   Row {i}: ❓ MISSING PRODUCT - {issue_type}")
-                else:
-                    print(f"   Row {i}: ❌ {result} - {issue_type} - {len(granular_diffs)} granular diffs")
-                    
-                    # Count issue types
-                    if granular_diffs:
-                        for j, diff in enumerate(granular_diffs, 1):
-                            diff_type = diff.get("type", "").lower()
-                            print(f"      Diff {j}: '{diff_type}'")
-                            if "price" in diff_type:
-                                manual_price += 1
-                                print(f"        💰 PRICE ISSUE counted")
-                            elif "text" in diff_type:
-                                manual_text += 1
-                                print(f"        📝 TEXT ISSUE counted")
-                    else:
-                        # Fallback to issue_type
-                        if "price" in issue_type.lower():
-                            manual_price += 1
-                            print(f"        💰 PRICE ISSUE counted from issue_type")
-                        if "text" in issue_type.lower():
-                            manual_text += 1
-                            print(f"        📝 TEXT ISSUE counted from issue_type")
-        
-        print(f"\n" + "="*60)
-        print("🎯 MANUAL COUNT VERIFICATION (These should appear in frontend):")
-        print(f"✅ Correct: {manual_correct}")
-        print(f"❌ Incorrect: {manual_incorrect}")
-        print(f"💰 Price Issues: {manual_price}")
-        print(f"📝 Text Issues: {manual_text}")
-        print(f"❓ Missing Products: {manual_missing}")
-        print("="*60)
-
-        # Export results - NOW AFTER DEBUG
+        # Export results to get the summary
         try:
-            print(f"\n🔄 CALLING EXPORT FUNCTION...")
-            export_result = comparator.export_practical_comparison(results, output_path)
-            print(f"\n🎯 EXPORT RESULT VERIFICATION:")
-            print(f"Export function returned: {export_result}")
-            print(f"Expected values should match manual count above ⬆️")
+            print(f"\n🔄 CALLING EXPORT FUNCTION to generate summary...")
+            # This function calculates the summary counts and saves the Excel file
+            export_summary = comparator.export_practical_comparison(results, output_path)
+            
+            # FIXED: Merge the calculated summary into the main results dictionary
+            results['summary_counts'] = export_summary
+            
+            print(f"\n🎯 EXPORT SUMMARY VERIFICATION:")
+            print(f"Export function returned summary: {export_summary}")
+            
         except Exception as e:
             print(f"\n❌ EXPORT ERROR: {e}")
             import traceback
             traceback.print_exc()
-            export_result = None
+            results['summary_counts'] = None # Ensure the key exists even on error
 
         print(f"\n✅ PRACTICAL RESULTS SAVED TO: {output_path}")
-        return results
+        return results # Return the combined results object
 
     except Exception as e:
         logger.error(f"Error in practical comparison: {e}")
         raise
-
  
 # ========================================
 # STREAMLINED CATALOG COMPARISON PIPELINE
