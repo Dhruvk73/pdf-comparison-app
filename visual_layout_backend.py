@@ -288,52 +288,27 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
     os.remove(temp_img_path)
     return sortable_boxes, saved_cropped_files
 
-# In SCRIPT 1
 
-# Replace the ENTIRE create_ranking_visualization function with this one:
-
-# In SCRIPT 1
-# Replace the ENTIRE create_ranking_visualization function with this one:
-
-# In SCRIPT 1
-# Replace the ENTIRE create_ranking_visualization function with this one:
 
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
-    Creates a visualization with PROMINENT, CORRECTLY PLACED red boxes and HIGH-VISIBILITY labels.
+    Creates a visualization with a yellow outline around products with issues
+    and a small yellow square in the top-left corner as an error indicator.
+    Removes the old red boxes and text labels.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy, "RGBA")
-
-    # --- FONT LOADING ---
-    label_font = None
-    font_size = 50  # Define a base font size
-    try:
-        # Prioritize common Linux fonts which are likely to exist in the environment
-        label_font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
-        logger.info(f"Successfully loaded DejaVuSans-Bold.ttf at size {font_size}")
-    except IOError:
-        logger.warning("DejaVuSans-Bold.ttf not found. Trying Arial...")
-        try:
-            label_font = ImageFont.truetype("arialbd.ttf", font_size)
-            logger.info(f"Successfully loaded arialbd.ttf at size {font_size}")
-        except IOError:
-            logger.warning("Arial Bold not found. Using default font.")
-            # If all else fails, load_default() is used, but we'll manage size manually
-            label_font = ImageFont.load_default()
 
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
     # --- STYLING ---
     product_outline_color = (255, 255, 0, 255)  # Solid, bright yellow
-    error_fill_color = (255, 0, 0, 128)      # Semi-transparent red
-    error_outline_color = (255, 0, 0, 255)   # Solid red
-    label_bg_color = (255, 255, 0)           # Opaque bright yellow
-    label_text_color = (0, 0, 0)             # Solid black
+    indicator_size = 40  # Size of the small square indicator
 
     logger.info(f"Processing {len(issue_details_per_rank)} products with issues for visualization.")
 
+    # Then, draw highlights and indicators for items with issues
     for rank, differences in issue_details_per_rank.items():
         if not differences:
             continue
@@ -345,85 +320,19 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
         # --- PRODUCT HIGHLIGHT ---
         box_data = boxes[rank - 1]
         product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
-        draw.rectangle(product_box_coords, outline=product_outline_color, width=15) # Very thick outline
+
+        # 1. Draw the main yellow outline around the entire product
+        draw.rectangle(product_box_coords, outline=product_outline_color, width=15)
         logger.info(f"Drew yellow outline for rank {rank} at {product_box_coords}")
 
-        # --- ERROR BOX AND LABEL DRAWING ---
-        for diff_idx, diff in enumerate(differences):
-            diff_type = diff.get("type", "Unknown")
-            # Use box1 for catalog 1, box2 for catalog 2. This function is called per catalog.
-            # We will assume the box coordinates provided are for the image being processed.
-            vlm_box = diff.get("box1") or diff.get("box2")
-
-            if not vlm_box or not isinstance(vlm_box, list) or len(vlm_box) != 4:
-                logger.warning(f"No valid bounding box for rank {rank}, diff {diff_idx}. Highlighting whole product.")
-                # Fallback: draw a generic highlight over the product if no specific box exists
-                draw.rectangle(product_box_coords, fill=(255, 0, 0, 80))
-                vlm_box = [20, 20, 120, 70] # Create a default box for the label position
-                # continue
-
-            try:
-                # --- COORDINATE CALCULATION (RE-IMPLEMENTED FOR ACCURACY) ---
-                vlm_x1, vlm_y1, vlm_x2, vlm_y2 = [float(coord) for coord in vlm_box]
-
-                # The VLM sees an image that was cropped with 10px padding.
-                # Its coordinates are relative to that padded crop.
-                CROP_PADDING = 10
-                
-                # The top-left of the original product box on the main page.
-                product_left, product_top = product_box_coords[0], product_box_coords[1]
-
-                # To find the absolute position of the error on the main page:
-                # 1. Start with the product's top-left corner on the page.
-                # 2. Subtract the padding to find the top-left of the image the VLM saw.
-                # 3. Add the VLM's relative coordinate.
-                abs_x1 = (product_left - CROP_PADDING) + vlm_x1
-                abs_y1 = (product_top - CROP_PADDING) + vlm_y1
-                abs_x2 = (product_left - CROP_PADDING) + vlm_x2
-                abs_y2 = (product_top - CROP_PADDING) + vlm_y2
-                
-                error_box = [int(c) for c in [abs_x1, abs_y1, abs_x2, abs_y2]]
-                logger.info(f"FIXED COORDINATE CALC: VLM box {vlm_box} -> Absolute box {error_box}")
-
-                # Draw the specific error box
-                draw.rectangle(error_box, fill=error_fill_color, outline=error_outline_color, width=8)
-
-                # --- LABEL DRAWING (RE-IMPLEMENTED FOR VISIBILITY) ---
-                label_text = diff_type.upper()
-                
-                # Calculate text size with robust fallback
-                try:
-                    # Use textbbox if font is a ttf file
-                    text_box = draw.textbbox((0, 0), label_text, font=label_font)
-                    text_w, text_h = text_box[2] - text_box[0], text_box[3] - text_box[1]
-                except (AttributeError, TypeError):
-                    # Fallback for default font which has no textbbox method
-                    text_w = len(label_text) * 15 # A more reasonable estimate for default font
-                    text_h = 20
-                    logger.warning("Using manual size calculation for default font.")
-
-                # Add padding for the label's background
-                bg_w, bg_h = text_w + 40, text_h + 20
-                
-                # Position the label above the error box
-                label_x = error_box[0]
-                label_y = error_box[1] - bg_h - 5 # 5px gap
-
-                # Adjust if label goes off-screen
-                if label_y < 0: label_y = error_box[3] + 5
-                if label_x + bg_w > img_copy.width: label_x = img_copy.width - bg_w
-
-                # Draw label background and text
-                draw.rectangle([label_x, label_y, label_x + bg_w, label_y + bg_h], fill=label_bg_color)
-                draw.text((label_x + 20, label_y + 10), label_text, fill=label_text_color, font=label_font)
-
-                logger.info(f"Drew label '{label_text}' for rank {rank}")
-
-            except (ValueError, TypeError) as e:
-                logger.error(f"Error during visualization for rank {rank}: {e}")
+        # 2. Draw the small yellow error indicator at the top-left corner
+        p_x1, p_y1 = product_box_coords[0], product_box_coords[1]
+        indicator_box = [p_x1, p_y1, p_x1 + indicator_size, p_y1 + indicator_size]
+        draw.rectangle(indicator_box, fill=product_outline_color)
+        logger.info(f"Drew error indicator for rank {rank} at {indicator_box}")
 
     img_copy.save(output_path, "JPEG", quality=95)
-    logger.info(f"Visualization with prominent highlights saved to: {output_path}")
+    logger.info(f"Visualization with new indicator style saved to: {output_path}")
 
 def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
@@ -1236,110 +1145,59 @@ class PracticalCatalogComparator:
         logger.info(f"Loaded {len(image_files)} ranked images from {folder_path}")
         return image_files
 
-    def extract_product_data_with_vlm(self, image_path: str, image_rank: int,
-                                     catalog_name: str) -> Dict:
-        """Extract focused product data - only what matters for comparison"""
-        item_id_for_log = f"{catalog_name}-Rank{image_rank}"
+    def find_differences_with_vlm(self, image1_path: str, image2_path: str, item_id_for_log: str) -> List[Dict]:
+        """
+        Enhanced VLM function with a more specific prompt to reduce false positives.
+        """
+        system_prompt = """
+        You are a highly specialized visual quality control inspector for retail catalogs. Your single focus is to identify SIGNIFICANT PRODUCTION ERRORS between two product images at the same position.
 
+        **CRITICAL RULES - READ CAREFULLY:**
+        1.  **IGNORE Minor Text Variations:** Do NOT report differences in capitalization (e.g., 'Tide' vs. 'tide'), pluralization (e.g., 'roll' vs. 'rolls'), or subtle descriptive wording changes. These are NOT errors.
+        2.  **IGNORE Minor Price Variations:** Do NOT report price differences unless they are greater than $3.00 OR one of the prices is clearly nonsensical (e.g., $0.00, partial text).
+        3.  **IGNORE Minor Image Variations:** Do NOT report differences in lighting, angle, or background.
+
+        **REPORT ONLY THE FOLLOWING ERRORS:**
+        -   **Price Error:** The main offer price differs by MORE than $3.00, or is garbled/missing.
+        -   **Text Error:** The primary BRAND name is fundamentally different (e.g., 'Tide' vs 'Gain'), or the product SIZE/COUNT is substantially different (e.g., '50 oz' vs '100 oz').
+        -   **Image Error:** The core product is completely wrong (e.g., a bottle of soda vs. a bag of chips).
+
+        **RESPONSE FORMAT:**
+        -   Return a JSON object: `{"differences": []}`.
+        -   If you find a valid error based on the rules above, populate the list. Each difference must have:
+            -   `"type"`: Must be "Price Error", "Text Error", or "Image Error".
+            -   `"description"`: A concise explanation (e.g., "Price difference: $4.99 vs $8.99", "Brand mismatch: Tide vs Gain", "Size mismatch: 12 rolls vs 24 rolls").
+            -   `"box1"`: Bounding box [x1, y1, x2, y2] of the error in the FIRST image. If no specific box, provide `null`.
+            -   `"box2"`: Bounding box [x1, y1, x2, y2] of the error in the SECOND image. If no specific box, provide `null`.
+        -   If there are NO significant errors, return an empty list: `{"differences": []}`.
+        """
         try:
-            with open(image_path, "rb") as image_file:
-                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+            with open(image1_path, "rb") as f1, open(image2_path, "rb") as f2:
+                b64_img1 = base64.b64encode(f1.read()).decode('utf-8')
+                b64_img2 = base64.b64encode(f2.read()).decode('utf-8')
 
-            # Focused VLM prompt - only extract what we need for comparison
-            # In find_differences_with_vlm, replace the entire system_prompt variable with this:
-
-            system_prompt = """
-            You are a precise visual comparison inspector. Your task is to compare two product images and identify key differences in three specific categories.
-
-            Your rules are:
-            1.  **Price Difference**: If the main offer prices are numerically different, report this.
-            2.  **Text Difference**: Focus ONLY on the primary Brand Name and the product's listed Size/Count (e.g., "50 oz", "12 rolls", "8 pack"). Report a difference if these do not match. You MUST ignore minor changes in descriptive words, slogans, or word order.
-            3.  **Image Difference**: Report this ONLY if the product shown is fundamentally different (e.g., a bottle vs. a box, a different product line). You MUST ignore small changes in angle, lighting, or position.
-
-            For EACH valid difference you find based on these rules, return a JSON object with:
-            - "type": "Price", "Text", or "Image".
-            - "box1": The bounding box [x1, y1, x2, y2] of the specific difference in the FIRST image.
-            - "box2": The bounding box [x1, y1, x2, y2] of the specific difference in the SECOND image.
-            - "description": A brief explanation (e.g., "$12.97 vs $14.97", "Brand: Tide vs Gain", "Size: 50 oz vs 75 oz").
-
-            If you find no differences according to these specific rules, return an empty list. Respond ONLY with a valid JSON object formatted as: {"differences": []}
-            """
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": system_prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                        }
-                    ]
-                }
-            ]
-
-            logger.info(f"ITEM_ID: {item_id_for_log} - Extracting focused product data")
+            messages = [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": system_prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img1}"}},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img2}"}}
+                ]
+            }]
 
             response = self.openai_client.chat.completions.create(
-                model=self.vlm_model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_tokens=2000,
-                temperature=0.1
+                model=self.vlm_model, messages=messages,
+                response_format={"type": "json_object"}, max_tokens=1024, temperature=0.0
             )
-
             response_content = response.choices[0].message.content
-
-            if response_content is None:
-                return {"error_message": "VLM returned no content", "item_id": item_id_for_log}
-
-            extracted_data = json.loads(response_content)
-
-            # Ensure expected fields exist
-            default_fields = {
-                'offer_price': None,
-                'regular_price': None,
-                'product_brand': None,
-                'product_type': None,
-                'size_quantity': None,
-                'product_status': 'Product Present',
-                'confidence_score': 5
-            }
-
-            for field, default_value in default_fields.items():
-                if field not in extracted_data:
-                    extracted_data[field] = default_value
-
-            # Parse prices
-            extracted_data['offer_price'] = self.parse_price_string(
-                extracted_data.get('offer_price'), f"{item_id_for_log}-offer"
-            )
-            extracted_data['regular_price'] = self.parse_price_string(
-                extracted_data.get('regular_price'), f"{item_id_for_log}-regular"
-            )
-
-            # Add metadata
-            extracted_data.update({
-                'item_id': item_id_for_log,
-                'image_path': image_path,
-                'rank': image_rank,
-                'catalog_name': catalog_name,
-                'filename': Path(image_path).name
-            })
-
-            # Normalize brand
-            extracted_data = self.normalize_product_data(extracted_data)
-
-            logger.info(f"ITEM_ID: {item_id_for_log} - Extraction complete: "
-                       f"Brand: {extracted_data.get('product_brand', 'No Brand')}, "
-                       f"Price: ${extracted_data.get('offer_price', 'No Price')}, "
-                       f"Size: {extracted_data.get('size_quantity', 'No Size')}, "
-                       f"Confidence: {extracted_data.get('confidence_score', 0)}/10")
-
-            return extracted_data
+            logger.info(f"ITEM_ID: {item_id_for_log} - VLM Response: {response_content}")
+            # Add robust parsing to handle potential VLM inconsistencies
+            parsed_json = json.loads(response_content)
+            return parsed_json.get("differences", [])
 
         except Exception as e:
-            logger.error(f"ITEM_ID: {item_id_for_log} - Extraction error: {e}")
-            return {"error_message": str(e), "item_id": item_id_for_log}
+            logger.error(f"ITEM_ID: {item_id_for_log} - VLM Error: {e}")
+            return []
 
     def parse_price_string(self, price_input, item_id_for_log="N/A"):
         """Enhanced price parsing for retail formats"""
