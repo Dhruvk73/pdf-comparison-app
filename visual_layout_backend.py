@@ -295,27 +295,56 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
     Creates a visualization with PROMINENT red boxes for specific error areas and yellow outlines for products with issues.
+    FIXED VERSION with proper coordinate handling and larger text.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy, "RGBA")
 
+    # FIXED: Try to load larger fonts with fallbacks
     try:
-        font = ImageFont.truetype("arial.ttf", 40)  # Increased size
-        label_font = ImageFont.truetype("arialbd.ttf", 36)  # Increased size
+        # Try different font sizes - much larger than before
+        font = ImageFont.truetype("arial.ttf", 60)  # Increased from 40
+        label_font = ImageFont.truetype("arialbd.ttf", 50)  # Increased from 36
+        logger.info("Successfully loaded Arial fonts with large sizes")
     except IOError:
-        font = ImageFont.load_default()
-        label_font = ImageFont.load_default()
-        logger.warning("Arial font not found, using default. Labels may be small.")
+        try:
+            # Try alternative font names
+            font = ImageFont.truetype("Arial.ttf", 60)
+            label_font = ImageFont.truetype("Arial Bold.ttf", 50)
+            logger.info("Successfully loaded Arial fonts (alternative names)")
+        except IOError:
+            try:
+                # Try system default with larger size
+                font = ImageFont.load_default()
+                label_font = ImageFont.load_default()
+                # Try to get a bigger default font if available
+                try:
+                    from PIL import ImageFont
+                    font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", 60)  # macOS
+                    label_font = ImageFont.truetype("/System/Library/Fonts/Arial Bold.ttf", 50)
+                    logger.info("Successfully loaded macOS system fonts")
+                except:
+                    try:
+                        font = ImageFont.truetype("C:/Windows/Fonts/arial.ttf", 60)  # Windows
+                        label_font = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 50)
+                        logger.info("Successfully loaded Windows system fonts")
+                    except:
+                        logger.warning("Using default fonts - text may be small")
+            except:
+                font = ImageFont.load_default()
+                label_font = ImageFont.load_default()
+                logger.warning("Using default fonts - text may be small")
 
     if issue_details_per_rank is None:
         issue_details_per_rank = {}
 
     # Enhanced colors for better visibility
-    error_box_color = (255, 0, 0, 180)  # Bright red with less transparency
+    error_box_color = (255, 0, 0, 160)  # Bright red with transparency
     error_outline_color = (255, 255, 255)  # White outline for contrast
     product_outline_color = (255, 255, 0)  # Yellow for product outline
     text_color = (255, 255, 255)  # White text
     text_stroke_color = (0, 0, 0)  # Black stroke for text
+    text_bg_color = (0, 0, 0, 220)  # Semi-transparent black background
 
     logger.info(f"Processing {len(issue_details_per_rank)} products with issues")
 
@@ -332,7 +361,7 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
             product_box_coords = [box_data["left"], box_data["top"], box_data["right"], box_data["bottom"]]
             
             # Draw THICK yellow outline around entire product with issues
-            draw.rectangle(product_box_coords, outline=product_outline_color, width=6)  # Increased width
+            draw.rectangle(product_box_coords, outline=product_outline_color, width=8)  # Increased width
             logger.info(f"Drew yellow outline for rank {rank} at {product_box_coords}")
 
             # Process each specific difference within this product
@@ -352,11 +381,10 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                     continue
 
                 try:
-                    # Translate coordinates from cropped product to full page
-                    offset_x, offset_y = product_box_coords[0], product_box_coords[1]
+                    # FIXED: Better coordinate handling
                     x1, y1, x2, y2 = [float(coord) for coord in diff_box_coords]
                     
-                    # Convert relative coordinates to absolute if needed
+                    # FIXED: Check if coordinates are relative (0-1) or absolute
                     if all(0 <= coord <= 1 for coord in [x1, y1, x2, y2]):
                         # Relative coordinates - convert to absolute within the product box
                         product_width = product_box_coords[2] - product_box_coords[0]
@@ -370,19 +398,32 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                         abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
                         logger.info(f"Converted relative coords {diff_box_coords} to absolute {abs_box}")
                     else:
-                        # Absolute coordinates - add offset
-                        abs_box = [x1 + offset_x, y1 + offset_y, x2 + offset_x, y2 + offset_y]
-                        logger.info(f"Applied offset to absolute coords: {diff_box_coords} -> {abs_box}")
+                        # FIXED: For absolute coordinates, handle them more carefully
+                        product_width = product_box_coords[2] - product_box_coords[0]
+                        product_height = product_box_coords[3] - product_box_coords[1]
+                        
+                        # If coordinates seem to be within product bounds, treat as relative to product
+                        if x2 <= product_width and y2 <= product_height:
+                            abs_x1 = product_box_coords[0] + x1
+                            abs_y1 = product_box_coords[1] + y1
+                            abs_x2 = product_box_coords[0] + x2
+                            abs_y2 = product_box_coords[1] + y2
+                            abs_box = [abs_x1, abs_y1, abs_x2, abs_y2]
+                            logger.info(f"Treated as product-relative coords: {diff_box_coords} -> {abs_box}")
+                        else:
+                            # Use as absolute page coordinates
+                            abs_box = [x1, y1, x2, y2]
+                            logger.info(f"Using as absolute page coords: {abs_box}")
                     
-                    # EXPAND the error box for better visibility
-                    expansion = 15  # pixels to expand in each direction
+                    # EXPANDED error box for better visibility
+                    expansion = 25  # Increased expansion
                     abs_box[0] = max(0, abs_box[0] - expansion)  # left
                     abs_box[1] = max(0, abs_box[1] - expansion)  # top
                     abs_box[2] = min(img_copy.width, abs_box[2] + expansion)  # right
                     abs_box[3] = min(img_copy.height, abs_box[3] + expansion)  # bottom
                     
-                    # Ensure minimum box size for visibility
-                    min_width, min_height = 120, 60  # Increased minimum size
+                    # FIXED: Ensure minimum box size for visibility
+                    min_width, min_height = 150, 80  # Increased minimum size
                     current_width = abs_box[2] - abs_box[0]
                     current_height = abs_box[3] - abs_box[1]
                     
@@ -397,40 +438,57 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
                         abs_box[3] = min(img_copy.height, abs_box[1] + min_height)
                     
                     # Ensure coordinates are within image bounds
-                    abs_box[0] = max(0, min(abs_box[0], img_copy.width))
-                    abs_box[1] = max(0, min(abs_box[1], img_copy.height))
-                    abs_box[2] = max(abs_box[0], min(abs_box[2], img_copy.width))
-                    abs_box[3] = max(abs_box[1], min(abs_box[3], img_copy.height))
+                    abs_box = [
+                        max(0, min(abs_box[0], img_copy.width)),
+                        max(0, min(abs_box[1], img_copy.height)), 
+                        max(abs_box[0], min(abs_box[2], img_copy.width)),
+                        max(abs_box[1], min(abs_box[3], img_copy.height))
+                    ]
                     
                     # Only draw if the box has valid dimensions
                     if abs_box[2] > abs_box[0] and abs_box[3] > abs_box[1]:
                         # Draw PROMINENT red error box with thick outline
-                        draw.rectangle(abs_box, fill=error_box_color, outline=error_outline_color, width=5)
+                        draw.rectangle(abs_box, fill=error_box_color, outline=error_outline_color, width=6)
                         
                         # Add a second inner outline for extra visibility
-                        inner_box = [abs_box[0]+3, abs_box[1]+3, abs_box[2]-3, abs_box[3]-3]
+                        inner_box = [abs_box[0]+4, abs_box[1]+4, abs_box[2]-4, abs_box[3]-4]
                         if inner_box[2] > inner_box[0] and inner_box[3] > inner_box[1]:
-                            draw.rectangle(inner_box, outline=(255, 0, 0), width=3)
+                            draw.rectangle(inner_box, outline=(255, 0, 0), width=4)
                         
-                        # Draw error type label with enhanced visibility
-                        label_y = abs_box[3] + 10  # 10 pixels below the error box
+                        # FIXED: Draw error type label with much better visibility
+                        label_text = diff_type
+                        
+                        # Position label ABOVE the error box for better visibility
                         label_x = abs_box[0]
+                        label_y = max(10, abs_box[1] - 80)  # Position above the box
                         
-                        # Ensure label doesn't go off the image
-                        if label_y < img_copy.height - 60:  # Leave space for text
-                            # Draw text background for better readability
-                            try:
-                                text_bbox = draw.textbbox((label_x, label_y), diff_type, font=label_font)
-                                bg_box = [text_bbox[0]-5, text_bbox[1]-3, text_bbox[2]+5, text_bbox[3]+3]
-                                draw.rectangle(bg_box, fill=(0, 0, 0, 200))  # Semi-transparent black background
-                            except:
-                                # Fallback if textbbox not available
-                                bg_box = [label_x-5, label_y-3, label_x+200, label_y+40]
-                                draw.rectangle(bg_box, fill=(0, 0, 0, 200))
-                            
-                            # Draw the text with thick stroke
-                            draw.text((label_x, label_y), diff_type, fill=text_color, font=label_font, 
-                                     stroke_width=3, stroke_fill=text_stroke_color)
+                        # FIXED: Calculate text size properly
+                        try:
+                            # Try to get text bounding box
+                            text_bbox = draw.textbbox((label_x, label_y), label_text, font=label_font)
+                            text_width = text_bbox[2] - text_bbox[0]
+                            text_height = text_bbox[3] - text_bbox[1]
+                        except:
+                            # Fallback text size estimation
+                            text_width = len(label_text) * 30  # Rough estimation
+                            text_height = 50
+                        
+                        # Ensure label fits within image bounds
+                        if label_x + text_width > img_copy.width:
+                            label_x = max(0, img_copy.width - text_width - 10)
+                        
+                        # Draw larger text background for better readability
+                        bg_box = [
+                            label_x - 10, 
+                            label_y - 10, 
+                            label_x + text_width + 20, 
+                            label_y + text_height + 10
+                        ]
+                        draw.rectangle(bg_box, fill=text_bg_color)
+                        
+                        # Draw the text with thick stroke and larger size
+                        draw.text((label_x, label_y), label_text, fill=text_color, font=label_font, 
+                                 stroke_width=4, stroke_fill=text_stroke_color)
                         
                         final_width = abs_box[2] - abs_box[0]
                         final_height = abs_box[3] - abs_box[1]
@@ -444,9 +502,14 @@ def create_ranking_visualization(pil_img: Image.Image, boxes: List[Dict], output
         else:
             logger.warning(f"No box data found for rank {rank}")
 
-    img_copy.save(output_path, "JPEG", quality=95)  # Higher quality
+    img_copy.save(output_path, "JPEG", quality=95)
     logger.info(f"Enhanced red error box visualization saved to: {output_path}")
     logger.info(f"Total products with issues highlighted: {len(issue_details_per_rank)}")
+
+    # ADDED: Debug information about image and text
+    logger.info(f"Image dimensions: {img_copy.width}x{img_copy.height}")
+    logger.info(f"Font used: {type(font)} at size 60")
+    logger.info(f"Label font used: {type(label_font)} at size 50")
 
 def create_ranking_visualization_fallback(pil_img: Image.Image, boxes: List[Dict], output_path: str, issue_details_per_rank: Optional[Dict] = None):
     """
@@ -2184,8 +2247,68 @@ def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: st
             catalog2_name
         )
 
-        # Export results
-        comparator.export_practical_comparison(results, output_path)
+        # ADD THIS DEBUG SECTION BEFORE EXPORT:
+        print("\n" + "="*60)
+        print("PRE-EXPORT DEBUGGING")
+        print("="*60)
+        
+        comparison_rows = results.get("comparison_rows", [])
+        print(f"Total comparison rows: {len(comparison_rows)}")
+        
+        # Count manually to verify
+        manual_correct = 0
+        manual_incorrect = 0
+        manual_price = 0
+        manual_text = 0
+        manual_missing = 0
+        
+        for i, row in enumerate(comparison_rows, 1):
+            result = row.get("comparison_result", "UNKNOWN")
+            issue_type = row.get("issue_type", "")
+            details = row.get("details", "")
+            granular_diffs = row.get("granular_differences", [])
+            
+            if result == "CORRECT":
+                manual_correct += 1
+            elif result == "INCORRECT":
+                manual_incorrect += 1
+                
+                # Check for missing products
+                if "Missing Product" in issue_type or "missing" in details.lower():
+                    manual_missing += 1
+                    print(f"Row {i}: MISSING PRODUCT - {issue_type}")
+                else:
+                    print(f"Row {i}: {result} - {issue_type} - {len(granular_diffs)} granular diffs")
+                    
+                    # Count issue types
+                    if granular_diffs:
+                        for diff in granular_diffs:
+                            diff_type = diff.get("type", "").lower()
+                            print(f"  -> Diff type: '{diff_type}'")
+                            if "price" in diff_type:
+                                manual_price += 1
+                            elif "text" in diff_type:
+                                manual_text += 1
+                    else:
+                        # Fallback to issue_type
+                        if "price" in issue_type.lower():
+                            manual_price += 1
+                        if "text" in issue_type.lower():
+                            manual_text += 1
+        
+        print(f"\nMANUAL COUNT VERIFICATION:")
+        print(f"Correct: {manual_correct}")
+        print(f"Incorrect: {manual_incorrect}")
+        print(f"Price Issues: {manual_price}")
+        print(f"Text Issues: {manual_text}")
+        print(f"Missing Products: {manual_missing}")
+        print("="*60)
+
+        # Export results (this should now show the correct counts)
+        export_result = comparator.export_practical_comparison(results, output_path)
+        
+        print(f"\nEXPORT RESULT VERIFICATION:")
+        print(f"Export returned: {export_result}")
 
         print(f"PRACTICAL RESULTS SAVED TO: {output_path}")
         return results
