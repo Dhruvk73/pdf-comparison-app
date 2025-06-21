@@ -251,6 +251,44 @@ st.markdown("""
     div[data-testid="stAlert"][kind="success"] p {
         color: #000000 !important; /* Black text color */
     }
+    /* Add this to your CSS section */
+    .stMetric {
+        color: #000000 !important;
+    }
+
+    .stMetric > div {
+        color: #000000 !important;
+    }
+
+    .stMetric label {
+        color: #4a5568 !important;
+    }
+
+    .stMetric > div > div {
+        color: #000000 !important;
+    }
+
+    /* Fix for success message text */
+    div[data-testid="stAlert"][kind="success"] p {
+        color: #000000 !important;
+    }
+
+    /* Ensure all text in metrics is black */
+    [data-testid="metric-container"] {
+        color: #000000 !important;
+    }
+
+    [data-testid="metric-container"] > div {
+        color: #000000 !important;
+    }
+
+    [data-testid="metric-container"] label {
+        color: #4a5568 !important;
+    }
+
+    [data-testid="metric-container"] > div > div {
+        color: #000000 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
