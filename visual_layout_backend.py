@@ -1906,9 +1906,10 @@ def catalog_comparison_pipeline(
                         viz_output_path_c1 = page_folder_c1 / viz_filename_c1
                         create_ranking_visualization(
                             pil_img=pil_img_c1,
-                            boxes=ranked_boxes_c1,
+                            ranked_boxes=ranked_boxes_c1,  # Fixed parameter name
+                            comparison_details=vlm_results_for_page,  # Add this
                             output_path=str(viz_output_path_c1),
-                            issue_product_ranks=issue_ranks_cat1 # Pass the identified issue ranks
+                            catalog_id='c1'  # Add this
                         )
                         logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
                     else:
@@ -1926,9 +1927,10 @@ def catalog_comparison_pipeline(
                         viz_output_path_c2 = page_folder_c2 / viz_filename_c2
                         create_ranking_visualization(
                             pil_img=pil_img_c2,
-                            boxes=ranked_boxes_c2,
+                            ranked_boxes=ranked_boxes_c2,  # Fixed parameter name
+                            comparison_details=vlm_results_for_page,  # Add this
                             output_path=str(viz_output_path_c2),
-                            issue_product_ranks=issue_ranks_cat2 # Pass the identified issue ranks
+                            catalog_id='c2'  # Add this
                         )
                         logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
                     else:
