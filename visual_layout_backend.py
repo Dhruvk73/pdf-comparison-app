@@ -291,17 +291,21 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # In SCRIPT 1
 
+# In visual_layout_backend.py
+# Replace the ENTIRE create_ranking_visualization function with this one.
+
 def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                                  comparison_details: Dict, output_path: str, catalog_id: str):
     """
     Creates a visualization with specific highlights for each error type.
+    This version correctly handles the dictionary structure of comparison_rows.
     
     Args:
         pil_img: The full page PIL image.
         ranked_boxes: List of detected product boxes with their page coordinates.
         comparison_details: The rich comparison result from the VLM step for this page.
         output_path: Where to save the generated image.
-        catalog_id: 'c1' or 'c2', to know which product data to use.
+        catalog_id: 'c1' or 'c2', to know which catalog's data to use for highlighting.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
@@ -311,72 +315,79 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     except IOError:
         font = ImageFont.load_default()
 
-    # Define colors for different error types
     error_colors = {
-        "PRICE_OFFER": "red",
-        "PRICE_REGULAR": "red",
-        "TEXT_TITLE": "orange",
-        "TEXT_DESCRIPTION": "yellow",
-        "PHOTO": "purple",
-        "MISSING": "black" # For the box where the other is missing
+        "PRICE_OFFER": "red", "PRICE_REGULAR": "red",
+        "TEXT_TITLE": "orange", "TEXT_DESCRIPTION": "yellow",
+        "PHOTO": "purple", "MISSING": "black"
     }
 
-    product_data_map = comparison_details.get(f"catalog{catalog_id[-1]}_products", {})
+    # Create a quick lookup map for the original detected boxes by their rank
+    boxes_by_rank = {idx + 1: box for idx, box in enumerate(ranked_boxes)}
+    
+    # Get the necessary data from the comparison results payload
+    catalog_num = catalog_id[-1] # Extracts '1' from 'c1' or '2' from 'c2'
+    product_vlm_data_map = comparison_details.get(f"catalog{catalog_num}_products", {})
+    comparison_rows_dict = comparison_details.get("comparison_rows", {})
 
-    for idx, main_box_data in enumerate(ranked_boxes):
-        rank = idx + 1
-        product_comparison = comparison_details.get("comparison_rows", {}).get(rank)
-        
-        if not product_comparison or not product_comparison.get("issues"):
-            continue # Skip if no issues
+    # --- FIX: Iterate over the comparison_rows dictionary correctly ---
+    for row_data in comparison_rows_dict.values():
+        issues = row_data.get("issues")
+        if not issues:
+            continue # Nothing to highlight for this comparison row
 
-        issues = product_comparison["issues"]
+        # Determine the rank of the product in THIS specific catalog ('c1' or 'c2')
+        rank_in_this_catalog = row_data.get(f"rank_c{catalog_num}")
         
-        # Get the VLM data for this specific product
-        product_vlm_data = product_data_map.get(rank)
-        if not product_vlm_data:
+        if not rank_in_this_catalog:
+            # This comparison row (e.g., a product missing from c1) is not relevant
+            # for the current visualization (e.g., the c1 page).
             continue
 
-        main_box_coords = {
-            "left": int(main_box_data.get("left", 0)),
-            "top": int(main_box_data.get("top", 0)),
-        }
+        # Get the corresponding product box and VLM data using the rank
+        main_box_data = boxes_by_rank.get(rank_in_this_catalog)
+        product_vlm_data = product_vlm_data_map.get(rank_in_this_catalog)
 
-        # Handle missing product case
-        if f"MISSING_C{catalog_id[-1]}" in issues:
+        if not main_box_data or not product_vlm_data:
+            continue # Sanity check
+
+        main_box_left = int(main_box_data.get("left", 0))
+        main_box_top = int(main_box_data.get("top", 0))
+
+        # --- Highlighting Logic (remains the same, now correctly targeted) ---
+        is_missing_issue = any(f"MISSING_C{catalog_num}" in s for s in issues)
+        if is_missing_issue:
             # This product exists, but its counterpart is missing. Highlight the whole box.
             draw.rectangle(
-                [main_box_coords['left'], main_box_coords['top'], main_box_data.get("right",0), main_box_data.get("bottom",0)],
-                outline=error_colors["MISSING"], width=5
+                [main_box_left, main_box_top, int(main_box_data.get("right",0)), int(main_box_data.get("bottom",0))],
+                outline=error_colors["MISSING"], width=6
             )
             continue
 
-        # Draw specific boxes for each issue
+        # Draw specific highlight boxes for each individual issue
         for issue_type in issues:
             if issue_type.startswith("PRICE"):
                 key = "offer_price" if issue_type == "PRICE_OFFER" else "regular_price"
-                sub_bbox = product_vlm_data.get(key, {}).get('bbox')
             elif issue_type.startswith("TEXT"):
                 key = "title" if issue_type == "TEXT_TITLE" else "description"
-                sub_bbox = product_vlm_data.get(key, {}).get('bbox')
             elif issue_type == "PHOTO":
-                sub_bbox = product_vlm_data.get("photo_area", {}).get('bbox')
+                key = "photo_area"
             else:
                 continue
 
+            field_data = product_vlm_data.get(key)
+            sub_bbox = field_data.get('bbox') if isinstance(field_data, dict) else None
+
             if sub_bbox and len(sub_bbox) == 4:
                 # Translate relative bbox to absolute page coordinates
-                abs_x1 = main_box_coords['left'] + sub_bbox[0]
-                abs_y1 = main_box_coords['top'] + sub_bbox[1]
-                abs_x2 = main_box_coords['left'] + sub_bbox[2]
-                abs_y2 = main_box_coords['top'] + sub_bbox[3]
+                abs_x1 = main_box_left + sub_bbox[0]
+                abs_y1 = main_box_top + sub_bbox[1]
+                abs_x2 = main_box_left + sub_bbox[2]
+                abs_y2 = main_box_top + sub_bbox[3]
                 
                 draw.rectangle([abs_x1, abs_y1, abs_x2, abs_y2], outline=error_colors.get(issue_type, "cyan"), width=4)
 
     img_copy.save(output_path, "JPEG", quality=90)
     logger.info(f"Generated specific highlights visualization at: {output_path}")
-
-
 # In SCRIPT 1
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
