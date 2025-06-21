@@ -290,51 +290,49 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
     return sortable_boxes, saved_cropped_files
 
 
-# In SCRIPT 1 - REPLACE the old function with this new one.
-
-# In SCRIPT 1 - REPLACE the previous function with this corrected version.
-
 def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                                  comparison_details: Dict, output_path: str, catalog_id: str):
     """
-    Creates a visualization with LARGE, READABLE labels and highlights the SPECIFIC areas
-    of mismatch (price, title, etc.) using VLM-provided bounding boxes.
-    (Version 2: Corrected for color specifier error).
+    Creates a visualization with LARGE, READABLE labels positioned correctly.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
     
-    # --- 1. ENHANCED FONT AND STYLE CONFIGURATION ---
-    base_image_dimension = max(pil_img.width, pil_img.height)
-    label_font_size = max(40, int(base_image_dimension * 0.015))
-    legend_font_size = max(35, int(base_image_dimension * 0.012))
-
+    # Calculate font size based on image size for better scaling
+    base_font_size = max(60, int(pil_img.height * 0.02))  # At least 60px
+    label_font_size = max(50, int(pil_img.height * 0.015))  # At least 50px
+    
+    # Try to load fonts with calculated sizes
     try:
-        font_path = "arialbd.ttf" if os.path.exists("arialbd.ttf") else "arial.ttf"
-        label_font = ImageFont.truetype(font_path, label_font_size)
-        legend_font = ImageFont.truetype(font_path, legend_font_size)
-    except IOError:
-        logger.warning("Arial font not found. Using default font. Labels may be smaller.")
-        label_font = ImageFont.load_default()
-        legend_font = ImageFont.load_default()
+        from PIL import ImageFont
+        font = ImageFont.truetype("arial.ttf", base_font_size)
+        label_font = ImageFont.truetype("arial.ttf", label_font_size)
+    except:
+        # If truetype fails, create a default font (this will be smaller but visible)
+        font = ImageFont.load_default()
+        label_font = font
+        # Log that we're using default font
+        logger.warning("Using default font - labels may be smaller than intended")
 
+    # Error type colors and labels with thicker lines
     error_styles = {
-        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 15},
-        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 15},
-        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 15},
-        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 15},
-        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 15},
-        "MISSING_P1": {"color": "#333333", "label": "MISSING", "width": 20},
-        "MISSING_P2": {"color": "#333333", "label": "MISSING", "width": 20}
+        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 12},
+        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 12},
+        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 12},
+        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 12},
+        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 12},
+        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 15},
+        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 15}
     }
 
-    # --- 2. DATA PREPARATION ---
+    # Create lookup map
     boxes_by_rank = {idx + 1: box for idx, box in enumerate(ranked_boxes)}
+    
     catalog_num = catalog_id[-1]
     product_vlm_data_map = comparison_details.get(f"catalog{catalog_num}_products", {})
     comparison_rows_dict = comparison_details.get("comparison_rows", {})
 
-    # --- 3. DRAWING HIGHLIGHTS AND LABELS ---
+    # Process each comparison row
     for row_data in comparison_rows_dict.values():
         issues = row_data.get("issues", [])
         if not issues:
@@ -349,110 +347,133 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
 
         if not main_box_data or not product_vlm_data:
             continue
-            
+
         main_box_left = int(main_box_data.get("left", 0))
         main_box_top = int(main_box_data.get("top", 0))
         main_box_right = int(main_box_data.get("right", 0))
         main_box_bottom = int(main_box_data.get("bottom", 0))
-        
-        padding = 10 
-        crop_origin_x = max(0, main_box_left - padding)
-        crop_origin_y = max(0, main_box_top - padding)
 
-        if f"MISSING_P{catalog_num}" in issues:
-            style = error_styles[f"MISSING_P{catalog_num}"]
+        # Handle missing products
+        is_missing_issue = f"MISSING_P{catalog_num}" in issues
+        if is_missing_issue:
             draw.rectangle(
                 [main_box_left, main_box_top, main_box_right, main_box_bottom],
-                outline=style["color"],
-                width=style["width"]
+                outline=error_styles["MISSING_P1"]["color"], 
+                width=error_styles["MISSING_P1"]["width"]
             )
-            label_text = style["label"]
+            
+            # Large label for missing
+            label_text = "MISSING"
+            # Create a background rectangle for the label
             text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
             text_width = text_bbox[2] - text_bbox[0]
             text_height = text_bbox[3] - text_bbox[1]
             
-            label_bg_x1 = main_box_left
-            label_bg_y1 = main_box_top - text_height - 15
-            label_bg_x2 = main_box_left + text_width + 30
-            label_bg_y2 = main_box_top - 5
-
-            draw.rectangle([label_bg_x1, label_bg_y1, label_bg_x2, label_bg_y2], fill=style["color"])
-            draw.text((label_bg_x1 + 15, label_bg_y1 + 5), label_text, fill="white", font=label_font)
+            label_x = main_box_left + (main_box_right - main_box_left - text_width) // 2
+            label_y = main_box_top - text_height - 20
+            
+            # White background with black border
+            padding = 15
+            draw.rectangle(
+                [label_x - padding, label_y - padding,
+                 label_x + text_width + padding, label_y + text_height + padding],
+                fill="white", outline="black", width=4
+            )
+            draw.text((label_x, label_y), label_text, fill="black", font=label_font)
             continue
 
+        # Draw specific highlights
         for issue_type in issues:
-            style = error_styles.get(issue_type)
-            if not style: continue
-
+            style = error_styles.get(issue_type, {"color": "gray", "label": "Issue", "width": 10})
+            
+            # Map issue type to field
             field_mapping = {
-                "PRICE_OFFER": "offer_price", "PRICE_REGULAR": "regular_price",
-                "TEXT_TITLE": "title", "TEXT_DESCRIPTION": "description", "PHOTO": "photo_area"
+                "PRICE_OFFER": "offer_price",
+                "PRICE_REGULAR": "regular_price",
+                "TEXT_TITLE": "title",
+                "TEXT_DESCRIPTION": "description",
+                "PHOTO": "photo_area"
             }
+            
             field_key = field_mapping.get(issue_type)
-            if not field_key: continue
+            if not field_key:
+                continue
 
             field_data = product_vlm_data.get(field_key)
-            if isinstance(field_data, dict) and 'bbox' in field_data and field_data['bbox']:
+            if isinstance(field_data, dict) and 'bbox' in field_data:
                 sub_bbox = field_data['bbox']
-                if len(sub_bbox) == 4:
-                    abs_x1 = crop_origin_x + sub_bbox[0]
-                    abs_y1 = crop_origin_y + sub_bbox[1]
-                    abs_x2 = crop_origin_x + sub_bbox[2]
-                    abs_y2 = crop_origin_y + sub_bbox[3]
-
+                if sub_bbox and len(sub_bbox) == 4:
+                    # Convert relative coordinates to absolute
+                    abs_x1 = main_box_left + sub_bbox[0]
+                    abs_y1 = main_box_top + sub_bbox[1]
+                    abs_x2 = main_box_left + sub_bbox[2]
+                    abs_y2 = main_box_top + sub_bbox[3]
+                    
+                    # Draw thick highlight box
                     draw.rectangle(
-                        [abs_x1, abs_y1, abs_x2, abs_y2],
-                        outline=style["color"],
+                        [abs_x1, abs_y1, abs_x2, abs_y2], 
+                        outline=style["color"], 
                         width=style["width"]
                     )
                     
+                    # Draw label with large font
                     label_text = style["label"]
                     text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
                     text_width = text_bbox[2] - text_bbox[0]
                     text_height = text_bbox[3] - text_bbox[1]
                     
-                    label_y_pos = abs_y1 - text_height - 15
-                    if label_y_pos < 10:
-                        label_y_pos = abs_y2 + 15
-                    label_x_pos = abs_x1
-
-                    bg_padding = 10
+                    # Position label above the box
+                    label_x = abs_x1 + (abs_x2 - abs_x1 - text_width) // 2
+                    label_y = abs_y1 - text_height - 20
+                    
+                    # If too close to top, place inside
+                    if label_y < 20:
+                        label_y = abs_y1 + 10
+                    
+                    # Draw label background
+                    padding = 15
                     draw.rectangle(
-                        [label_x_pos - bg_padding, label_y_pos - bg_padding,
-                         label_x_pos + text_width + bg_padding, label_y_pos + text_height + bg_padding],
-                        fill=style["color"]
+                        [label_x - padding, label_y - padding,
+                         label_x + text_width + padding, label_y + text_height + padding],
+                        fill="white", outline=style["color"], width=4
                     )
-                    draw.text((label_x_pos, label_y_pos), label_text, fill="white", font=label_font)
+                    
+                    # Draw label text
+                    draw.text((label_x, label_y), label_text, fill=style["color"], font=label_font)
 
-    # --- 4. DRAW LEGEND ---
-    legend_items = [
-        ("Price Issues", error_styles["PRICE_OFFER"]["color"]),
-        ("Text Issues", error_styles["TEXT_TITLE"]["color"]),
-        ("Photo Issues", error_styles["PHOTO"]["color"]),
-        ("Missing Product", error_styles["MISSING_P1"]["color"])
-    ]
-    legend_width = int(base_image_dimension * 0.15)
-    legend_height = len(legend_items) * (legend_font_size + 25) + 60
-    legend_x = img_copy.width - legend_width - 20
-    legend_y = 20
+    # Add large legend
+    legend_size = max(300, int(pil_img.width * 0.1))
+    legend_x = pil_img.width - legend_size - 30
+    legend_y = 30
     
-    # ******** THIS IS THE CORRECTED LINE ********
+    # Legend background
     draw.rectangle(
-        [legend_x, legend_y, legend_x + legend_width, legend_y + legend_height],
-        fill="white", outline="black", width=3  # Changed from rgba(...) to "white"
+        [legend_x, legend_y, legend_x + legend_size, legend_y + 250],
+        fill="white", outline="black", width=4
     )
-    # *******************************************
-
-    draw.text((legend_x + 15, legend_y + 15), "LEGEND", fill="black", font=legend_font)
+    
+    # Legend title
+    draw.text((legend_x + 20, legend_y + 20), "LEGEND", fill="black", font=label_font)
+    
+    legend_items = [
+        ("Price Issues", "#FF0000"),
+        ("Text Issues", "#FF8C00"),
+        ("Photo Issues", "#9370DB"),
+        ("Missing Product", "#000000")
+    ]
     
     for i, (label, color) in enumerate(legend_items):
-        y_pos = legend_y + 60 + i * (legend_font_size + 25)
-        draw.rectangle([legend_x + 15, y_pos, legend_x + 15 + 40, y_pos + legend_font_size], fill=color)
-        draw.text((legend_x + 65, y_pos), label, fill="black", font=legend_font)
+        y_pos = legend_y + 80 + i * 45
+        # Color box
+        draw.rectangle(
+            [legend_x + 20, y_pos, legend_x + 50, y_pos + 30],
+            fill=color, outline=color
+        )
+        # Label text
+        draw.text((legend_x + 60, y_pos), label, fill="black", font=label_font)
 
-    # --- 5. SAVE FINAL IMAGE ---
     img_copy.save(output_path, "JPEG", quality=95)
-    logger.info(f"Generated enhanced visualization with specific highlights at: {output_path}")
+    logger.info(f"Generated visualization with large labels at: {output_path}")
     
 # In SCRIPT 1
 
