@@ -1300,110 +1300,104 @@ class PracticalCatalogComparator:
 
         return is_same, max_score
 
+    # In visual_layout_backend.py -> class PracticalCatalogComparator:
+
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
-                                      catalog1_name: str = None, catalog2_name: str = None) -> Dict:
-        """Generate practical comparison focused on what matters"""
-        if not catalog1_name:
-            catalog1_name = Path(folder1_path).name
-        if not catalog2_name:
-            catalog2_name = Path(folder2_path).name
-
+                                      catalog1_name: str = "Cat1", catalog2_name: str = "Cat2") -> Dict:
+        """
+        Generate a practical, detailed comparison by matching products based on brand similarity
+        and then creating a granular comparison row for each match.
+        """
         logger.info(f"Starting practical comparison: {catalog1_name} vs {catalog2_name}")
-        logger.info(f"Focus: Price differences and different products only")
 
-        # Load and process images
+        # Load and process images from both catalogs
         catalog1_images = self.load_ranked_images_from_folder(folder1_path)
         catalog2_images = self.load_ranked_images_from_folder(folder2_path)
 
-        # Extract product data
-        logger.info("Extracting focused product data from Catalog 1...")
-        catalog1_products = {}
-        for img_info in catalog1_images:
-            product_data = self.extract_product_data_with_vlm(
-                img_info['file_path'],
-                img_info['rank'],
-                catalog1_name
-            )
-            if "error_message" not in product_data:
-                catalog1_products[img_info['rank']] = product_data
-
-        logger.info("Extracting focused product data from Catalog 2...")
-        catalog2_products = {}
-        for img_info in catalog2_images:
-            product_data = self.extract_product_data_with_vlm(
-                img_info['file_path'],
-                img_info['rank'],
-                catalog2_name
-            )
-            if "error_message" not in product_data:
-                catalog2_products[img_info['rank']] = product_data
-
-        # ===============================================================
-        # ADD THIS NEW LOGIC IN ITS PLACE
-        # ===============================================================
-
-        comparison_rows = []
+        # Extract structured data using VLM
+        logger.info(f"Extracting VLM data for {catalog1_name}...")
+        catalog1_products = {img['rank']: self.extract_product_data_with_vlm(img['file_path'], img['rank'], catalog1_name) for img in catalog1_images}
         
-        # Convert the dictionary of catalog 2 products into a list we can modify
+        logger.info(f"Extracting VLM data for {catalog2_name}...")
+        catalog2_products = {img['rank']: self.extract_product_data_with_vlm(img['file_path'], img['rank'], catalog2_name) for img in catalog2_images}
+
+        # Clean up any products that had VLM errors
+        catalog1_products = {k: v for k, v in catalog1_products.items() if "error_message" not in v}
+        catalog2_products = {k: v for k, v in catalog2_products.items() if "error_message" not in v}
+
+        comparison_rows = {} # Use a dictionary keyed by rank for easier lookup
         unmatched_c2_products = list(catalog2_products.values())
-        
-        # --- Part 1: Find matches for every product in Catalog 1 ---
+
+        # --- Part 1: Find the best match for each product in Catalog 1 ---
         for p1_rank, p1_data in catalog1_products.items():
             best_match_p2 = None
             highest_score = -1
 
             # Find the best possible match in the list of unmatched catalog 2 products
             for p2_data in unmatched_c2_products:
-                # Use the brand similarity function you already wrote
                 is_match, score = self.are_brands_same_product(
-                    p1_data.get('product_brand'), 
+                    p1_data.get('product_brand'),
                     p2_data.get('product_brand')
                 )
-                
-                # If it's a potential match and has a higher score than previous findings
                 if is_match and score > highest_score:
                     highest_score = score
                     best_match_p2 = p2_data
-            
+
+            # Create the comparison row based on whether a match was found
             if best_match_p2:
-                # A confident match was found! Create the comparison row.
-                row = self.create_practical_comparison_row(p1_data, best_match_p2, p1_rank, catalog1_name, catalog2_name)
-                if row:
-                    comparison_rows.append(row)
-                
-                # IMPORTANT: Remove the matched product so it can't be matched again
+                # A confident match was found.
+                # FIX: Call with the correct 2 arguments (product1, product2)
+                result = self.create_practical_comparison_row(p1_data, best_match_p2)
+                row = {
+                    f"{catalog1_name}_details": result["p1_details"],
+                    f"{catalog2_name}_details": result["p2_details"],
+                    "issues": result["issues"],
+                    "rank_c1": p1_rank,
+                    "rank_c2": best_match_p2.get('rank')
+                }
+                comparison_rows[p1_rank] = row
                 unmatched_c2_products.remove(best_match_p2)
             else:
-                # No match was found for this catalog 1 product, so it's missing from catalog 2
-                row = self.create_practical_comparison_row(p1_data, None, p1_rank, catalog1_name, catalog2_name)
-                if row:
-                    comparison_rows.append(row)
+                # No match was found for this catalog 1 product.
+                # FIX: Call with the correct 2 arguments (product1, None)
+                result = self.create_practical_comparison_row(p1_data, None)
+                row = {
+                    f"{catalog1_name}_details": result["p1_details"],
+                    f"{catalog2_name}_details": result["p2_details"],
+                    "issues": result["issues"],
+                    "rank_c1": p1_rank,
+                    "rank_c2": None
+                }
+                comparison_rows[p1_rank] = row
 
-        # --- Part 2: Handle products that are in Catalog 2 but were never matched ---
-        # These are products missing from Catalog 1
-        for p2_data_unmatched in unmatched_c2_products:
-            p2_rank = p2_data_unmatched.get('rank', 'N/A')
-            row = self.create_practical_comparison_row(None, p2_data_unmatched, p2_rank, catalog1_name, catalog2_name)
-            if row:
-                comparison_rows.append(row)
+        # --- Part 2: Handle products from Catalog 2 that were never matched ---
+        for p2_unmatched in unmatched_c2_products:
+            p2_rank = p2_unmatched.get('rank')
+            # FIX: Call with the correct 2 arguments (None, product2)
+            result = self.create_practical_comparison_row(None, p2_unmatched)
+            row = {
+                f"{catalog1_name}_details": result["p1_details"],
+                f"{catalog2_name}_details": result["p2_details"],
+                "issues": result["issues"],
+                "rank_c1": None,  # It's missing from C1
+                "rank_c2": p2_rank
+            }
+            # Use a unique key for these unmatched items
+            comparison_rows[f"unmatched_c2_rank_{p2_rank}"] = row
 
-        result = {
+        # --- Final Assembly ---
+        final_result = {
             "catalog1_name": catalog1_name,
             "catalog2_name": catalog2_name,
-            "comparison_rows": comparison_rows,
+            "comparison_rows": comparison_rows, # Pass the dictionary keyed by rank
             "catalog1_total_products": len(catalog1_products),
             "catalog2_total_products": len(catalog2_products),
-            "catalog1_products": catalog1_products,
+            "catalog1_products": catalog1_products, # Pass for visualization lookup
             "catalog2_products": catalog2_products,
-            "comparison_criteria": {
-                "price_tolerance": self.price_tolerance,
-                "brand_similarity_threshold": 80,
-                "focus": "Price differences and different products only"
-            }
         }
-
+        
         logger.info(f"Practical comparison complete. Generated {len(comparison_rows)} comparison rows.")
-        return result
+        return final_result
 
     def create_practical_comparison_row(self, product1: Dict, product2: Dict) -> Dict:
         """Creates a detailed comparison row with a list of specific issue types."""
