@@ -1957,7 +1957,7 @@ def catalog_comparison_pipeline(
                     # This part is complex, as it needs to align with how frontend will show it.
                     # For now, let's just count errors.
                     
-                    for row in comparison_rows:
+                    for row in comparison_rows.values():  # Note the addition of .values()
                         issues = row.get("issues", [])
                         if issues:
                             total_mistakes += len(issues)
