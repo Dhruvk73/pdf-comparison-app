@@ -1070,6 +1070,10 @@ def process_folders_with_image_templates(template1_path: str, template2_path: st
 # SCRIPT 3: VLM Catalog Comparison
 # ========================================
 
+# ========================================
+# SCRIPT 3: VLM Catalog Comparison (FINAL, COMPLETE VERSION)
+# ========================================
+
 class PracticalCatalogComparator:
     """
     Practical VLM-based catalog comparison focused on what matters:
@@ -1081,9 +1085,7 @@ class PracticalCatalogComparator:
     def __init__(self, openai_api_key: str, vlm_model: str = "gpt-4o", price_tolerance: float = 0.01):
         self.openai_client = openai.OpenAI(api_key=openai_api_key)
         self.vlm_model = vlm_model
-        self.price_tolerance = price_tolerance # Allow small price differences
-
-        # Enhanced brand normalization for fuzzy matching
+        self.price_tolerance = price_tolerance
         self.brand_corrections = {
             'downy': 'Downy', 'gain': 'Gain', 'tide': 'Tide', 'glad': 'Glad',
             'scott': 'Scott', 'raid': 'Raid', 'ace': 'Ace', 'purex': 'Purex',
@@ -1091,8 +1093,6 @@ class PracticalCatalogComparator:
             'palmolive': 'Palmolive', 'ajax': 'Ajax', 'dawn': 'Dawn',
             'charmin': 'Charmin', 'kleenex': 'Kleenex', 'febreze': 'Febreze'
         }
-
-        # Enhanced unit normalizations
         self.unit_normalizations = {
             'onzas': 'oz', 'onza': 'oz', 'ozs': 'oz', 'ounces': 'oz',
             'libras': 'lb', 'libra': 'lb', 'lbs': 'lb', 'pounds': 'lb',
@@ -1103,6 +1103,25 @@ class PracticalCatalogComparator:
             'rollos': 'rolls', 'rollo': 'roll',
             'ct': 'ct', 'count': 'ct', 'unidades': 'ct', 'piezas': 'ct'
         }
+
+    # --- HELPER METHODS ---
+    def _get_val(self, p: Optional[Dict], key: str) -> Optional[str]:
+        """Safely extracts a value from a potentially nested dictionary."""
+        if not p: return None
+        field_data = p.get(key)
+        if isinstance(field_data, dict):
+            return field_data.get('value')
+        return field_data
+
+    def _get_bbox(self, p: Optional[Dict], key: str) -> Optional[List[int]]:
+        """Safely extracts a bounding box from a potentially nested dictionary."""
+        if not p: return None
+        field_data = p.get(key)
+        if isinstance(field_data, dict):
+            return field_data.get('bbox')
+        return None
+
+    # --- CORE CLASS METHODS ---
 
     def load_ranked_images_from_folder(self, folder_path: str) -> List[Dict]:
         """Load ranked images from folder"""
@@ -1115,31 +1134,26 @@ class PracticalCatalogComparator:
 
         for file_path in folder_path.iterdir():
             if file_path.suffix.lower() in supported_extensions:
-                # Enhanced rank extraction patterns
                 rank_patterns = [
                     r'rank[_\s]*(\d+)',
                     r'(\d+)[_\s]*rank',
                     r'position[_\s]*(\d+)',
                     r'(?:^|[_\s])(\d+)(?:[_\s]|$)'
                 ]
-
                 rank = None
                 for pattern in rank_patterns:
                     rank_match = re.search(pattern, file_path.stem, re.IGNORECASE)
                     if rank_match:
                         rank = int(rank_match.group(1))
                         break
-
                 if rank is None:
                     rank = len(image_files) + 1
-
                 image_files.append({
                     'file_path': str(file_path),
                     'filename': file_path.name,
                     'rank': rank,
                     'folder_name': folder_path.name
                 })
-
         image_files.sort(key=lambda x: x['rank'])
         logger.info(f"Loaded {len(image_files)} ranked images from {folder_path}")
         return image_files
@@ -1150,8 +1164,7 @@ class PracticalCatalogComparator:
         try:
             with open(image_path, "rb") as image_file:
                 base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-
-            # NEW VLM PROMPT asking for bounding boxes
+            
             system_prompt = """
             You are a precise data extraction expert for retail catalogs.
             Analyze the product image and return a JSON object with the specified fields.
@@ -1189,7 +1202,6 @@ class PracticalCatalogComparator:
                     ]
                 }
             ]
-
             logger.info(f"ITEM_ID: {item_id_for_log} - Extracting structured data with bboxes...")
             response = self.openai_client.chat.completions.create(
                 model=self.vlm_model,
@@ -1201,169 +1213,69 @@ class PracticalCatalogComparator:
             response_content = response.choices[0].message.content
             if response_content is None:
                 return {"error_message": "VLM returned no content", "item_id": item_id_for_log}
-
             extracted_data = json.loads(response_content)
-
-            # Add metadata and return
             extracted_data.update({
                 'item_id': item_id_for_log, 'image_path': image_path,
                 'rank': image_rank, 'catalog_name': catalog_name,
                 'filename': Path(image_path).name
             })
             return extracted_data
-
         except Exception as e:
             logger.error(f"ITEM_ID: {item_id_for_log} - VLM Extraction error: {e}")
             return {"error_message": str(e), "item_id": item_id_for_log}
-
-    def parse_price_string(self, price_input, item_id_for_log="N/A"):
-        """Enhanced price parsing for retail formats"""
-        if price_input is None or price_input == "":
-            return None
-
-        if isinstance(price_input, (int, float)):
-            if price_input < 0:
-                return None
-            if isinstance(price_input, int) and 100 <= price_input <= 99999:
-                s_price = str(price_input)
-                if len(s_price) == 3:
-                    return float(f"{s_price[0]}.{s_price[1:]}")
-                if len(s_price) == 4:
-                    return float(f"{s_price[:2]}.{s_price[2:]}")
-            return float(price_input)
-
-        price_str = str(price_input).strip()
-
-        # Remove currency symbols and clean
-        price_str = re.sub(r'[$¢€£]', '', price_str)
-        price_str = re.sub(r'[^\d\s\.]', '', price_str)
-        price_str = price_str.strip()
-
-        if not price_str:
-            return None
-
-        # Space separated (e.g., "8 87", "10 49")
-        space_match = re.match(r'^(\d{1,2})\s+(\d{2})(?:\s*(?:c/u|each|ea)?.*)?$', price_str)
-        if space_match:
-            return float(f"{space_match.group(1)}.{space_match.group(2)}")
-
-        # 3-digit (e.g., "887" -> 8.87)
-        if re.fullmatch(r'[1-9]\d{2}', price_str):
-            return float(f"{price_str[0]}.{price_str[1:]}")
-
-        # 4-digit (e.g., "1097" -> 10.97)
-        if re.fullmatch(r'[1-9]\d{3}', price_str):
-            return float(f"{price_str[:2]}.{price_str[2:]}")
-
-        # Standard decimal
-        decimal_match = re.search(r'(\d+)\.(\d{1,2})', price_str)
-        if decimal_match:
-            return float(f"{decimal_match.group(1)}.{decimal_match.group(2)}")
-
-        return None
-
-    def normalize_product_data(self, product_data):
-        """Normalize product data for better comparison"""
-        if not isinstance(product_data, dict):
-            return product_data
-
-        # Safe brand normalization
-        if product_data.get('product_brand'):
-            brand_raw = product_data['product_brand']
-            if isinstance(brand_raw, str):
-                brand_lower = brand_raw.lower().strip()
-                product_data['product_brand'] = self.brand_corrections.get(
-                    brand_lower, product_data['product_brand']
-                )
-
-        return product_data
 
     def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
         """Check if two brands represent the same product using fuzzy matching"""
         if not brand1 or not brand2:
             return False, 0
-
-        # Normalize brands for comparison
         b1 = str(brand1).lower().strip()
         b2 = str(brand2).lower().strip()
-
-        # Exact match
         if b1 == b2:
             return True, 100
-
-        # Remove common words that don't affect product identity
         common_words = ['simply', 'ultra', 'advanced', 'new', 'improved', 'original', 'classic']
-
         def clean_brand(brand):
             words = brand.split()
             return ' '.join([w for w in words if w not in common_words])
-
         b1_clean = clean_brand(b1)
         b2_clean = clean_brand(b2)
-
-        # Check if core brand names match
         scores = [
             fuzz.ratio(b1_clean, b2_clean),
             fuzz.partial_ratio(b1_clean, b2_clean),
             fuzz.token_sort_ratio(b1_clean, b2_clean)
         ]
-
         max_score = max(scores)
-
-        # More lenient threshold - 80% similarity means same product
         is_same = max_score >= 80
-
         logger.debug(f"Brand comparison: '{brand1}' vs '{brand2}' -> {max_score}% (Same: {is_same})")
-
         return is_same, max_score
-
-    # In visual_layout_backend.py -> class PracticalCatalogComparator:
 
     def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
                                       catalog1_name: str = "Cat1", catalog2_name: str = "Cat2") -> Dict:
-        """
-        Generate a practical, detailed comparison by matching products based on brand similarity
-        and then creating a granular comparison row for each match.
-        """
+        """Generate a practical, detailed comparison by matching products and creating a row for each."""
         logger.info(f"Starting practical comparison: {catalog1_name} vs {catalog2_name}")
-
-        # Load and process images from both catalogs
         catalog1_images = self.load_ranked_images_from_folder(folder1_path)
         catalog2_images = self.load_ranked_images_from_folder(folder2_path)
-
-        # Extract structured data using VLM
         logger.info(f"Extracting VLM data for {catalog1_name}...")
         catalog1_products = {img['rank']: self.extract_product_data_with_vlm(img['file_path'], img['rank'], catalog1_name) for img in catalog1_images}
-        
         logger.info(f"Extracting VLM data for {catalog2_name}...")
         catalog2_products = {img['rank']: self.extract_product_data_with_vlm(img['file_path'], img['rank'], catalog2_name) for img in catalog2_images}
-
-        # Clean up any products that had VLM errors
         catalog1_products = {k: v for k, v in catalog1_products.items() if "error_message" not in v}
         catalog2_products = {k: v for k, v in catalog2_products.items() if "error_message" not in v}
-
-        comparison_rows = {} # Use a dictionary keyed by rank for easier lookup
+        comparison_rows = {}
         unmatched_c2_products = list(catalog2_products.values())
 
-        # --- Part 1: Find the best match for each product in Catalog 1 ---
         for p1_rank, p1_data in catalog1_products.items():
             best_match_p2 = None
             highest_score = -1
-
-            # Find the best possible match in the list of unmatched catalog 2 products
             for p2_data in unmatched_c2_products:
                 is_match, score = self.are_brands_same_product(
-                    p1_data.get('product_brand'),
-                    p2_data.get('product_brand')
+                    self._get_val(p1_data, 'product_brand'),
+                    self._get_val(p2_data, 'product_brand')
                 )
                 if is_match and score > highest_score:
                     highest_score = score
                     best_match_p2 = p2_data
-
-            # Create the comparison row based on whether a match was found
+            
             if best_match_p2:
-                # A confident match was found.
-                # FIX: Call with the correct 2 arguments (product1, product2)
                 result = self.create_practical_comparison_row(p1_data, best_match_p2)
                 row = {
                     f"{catalog1_name}_details": result["p1_details"],
@@ -1375,8 +1287,6 @@ class PracticalCatalogComparator:
                 comparison_rows[p1_rank] = row
                 unmatched_c2_products.remove(best_match_p2)
             else:
-                # No match was found for this catalog 1 product.
-                # FIX: Call with the correct 2 arguments (product1, None)
                 result = self.create_practical_comparison_row(p1_data, None)
                 row = {
                     f"{catalog1_name}_details": result["p1_details"],
@@ -1387,59 +1297,35 @@ class PracticalCatalogComparator:
                 }
                 comparison_rows[p1_rank] = row
 
-        # --- Part 2: Handle products from Catalog 2 that were never matched ---
         for p2_unmatched in unmatched_c2_products:
             p2_rank = p2_unmatched.get('rank')
-            # FIX: Call with the correct 2 arguments (None, product2)
             result = self.create_practical_comparison_row(None, p2_unmatched)
             row = {
                 f"{catalog1_name}_details": result["p1_details"],
                 f"{catalog2_name}_details": result["p2_details"],
                 "issues": result["issues"],
-                "rank_c1": None,  # It's missing from C1
+                "rank_c1": None,
                 "rank_c2": p2_rank
             }
-            # Use a unique key for these unmatched items
             comparison_rows[f"unmatched_c2_rank_{p2_rank}"] = row
 
-        # --- Final Assembly ---
         final_result = {
             "catalog1_name": catalog1_name,
             "catalog2_name": catalog2_name,
-            "comparison_rows": comparison_rows, # Pass the dictionary keyed by rank
+            "comparison_rows": comparison_rows,
             "catalog1_total_products": len(catalog1_products),
             "catalog2_total_products": len(catalog2_products),
-            "catalog1_products": catalog1_products, # Pass for visualization lookup
-            "catalog2_products": catalog2_products,
+            "catalog1_products": catalog1_products,
+            "catalog2_products": catalog2_products
         }
-        
         logger.info(f"Practical comparison complete. Generated {len(comparison_rows)} comparison rows.")
         return final_result
 
-    # In visual_layout_backend.py -> class PracticalCatalogComparator:
-
-    def create_practical_comparison_row(self, product1: Dict, product2: Dict) -> Dict:
-        """
-        Creates a detailed comparison row. This version is robust to VLM output inconsistencies.
-        """
-        if not product1 and not product2: return {}
-
-        # NEW: Robust helper to get a value, whether it's direct or nested in a dict
-        def get_val(p, key):
-            if not p: return None
-            field_data = p.get(key)
-            if isinstance(field_data, dict):
-                return field_data.get('value')
-            return field_data # Handles cases where the value is returned directly
-
-        # NEW: Robust helper to get a bounding box
-        def get_bbox(p, key):
-            if not p: return None
-            field_data = p.get(key)
-            if isinstance(field_data, dict):
-                return field_data.get('bbox')
-            return None # No bbox if the data is not a dict
-
+    def create_practical_comparison_row(self, product1: Optional[Dict], product2: Optional[Dict]) -> Dict:
+        """Creates a detailed comparison row for two products."""
+        if not product1 and not product2:
+            return {}
+        
         issues = []
         p1_info = self.format_product_display(product1)
         p2_info = self.format_product_display(product2)
@@ -1449,172 +1335,125 @@ class PracticalCatalogComparator:
         if not product2:
             return {"p1_details": p1_info, "p2_details": "Product Missing", "issues": ["MISSING_P2"]}
 
-        # --- Compare fields using the robust get_val helper ---
-
-        # Price Comparison
-        if get_val(product1, 'offer_price') != get_val(product2, 'offer_price'):
+        if self._get_val(product1, 'offer_price') != self._get_val(product2, 'offer_price'):
             issues.append("PRICE_OFFER")
-        if get_val(product1, 'regular_price') != get_val(product2, 'regular_price'):
+        if self._get_val(product1, 'regular_price') != self._get_val(product2, 'regular_price'):
             issues.append("PRICE_REGULAR")
-
-        # Text Comparison
-        p1_title = get_val(product1, 'title')
-        p2_title = get_val(product2, 'title')
+        
+        p1_title = self._get_val(product1, 'title')
+        p2_title = self._get_val(product2, 'title')
         if fuzz.ratio(str(p1_title).lower(), str(p2_title).lower()) < 85:
             issues.append("TEXT_TITLE")
 
-        # Photo Comparison
         try:
-            p1_photo_bbox = get_bbox(product1, 'photo_area')
-            p2_photo_bbox = get_bbox(product2, 'photo_area')
+            p1_photo_bbox = self._get_bbox(product1, 'photo_area')
+            p2_photo_bbox = self._get_bbox(product2, 'photo_area')
             if p1_photo_bbox and p2_photo_bbox and product1.get('image_path') and product2.get('image_path'):
                 p1_img = Image.open(product1['image_path'])
                 p2_img = Image.open(product2['image_path'])
                 p1_photo = p1_img.crop(tuple(p1_photo_bbox))
                 p2_photo = p2_img.crop(tuple(p2_photo_bbox))
 
-                # Convert to grayscale numpy arrays for comparison
-                p1_np = np.array(p1_photo.convert('L'))
-                p2_np = np.array(p2_photo.convert('L').resize(p1_np.T.shape))
-
-                # Calculate structural similarity
-                score, _ = structural_similarity(p1_np, p2_np, full=True, data_range=p1_np.max() - p1_np.min())
-                if score < 0.6: # Lower score means less similar
-                    issues.append("PHOTO")
+                if p1_photo.size[0] > 0 and p1_photo.size[1] > 0 and p2_photo.size[0] > 0 and p2_photo.size[1] > 0:
+                    p1_np = np.array(p1_photo.convert('L'))
+                    p2_np = np.array(p2_photo.convert('L').resize(p1_np.T.shape))
+                    
+                    win_size = min(p1_np.shape[0], p1_np.shape[1], p2_np.shape[0], p2_np.shape[1])
+                    if win_size < 7:
+                        logger.warning(f"Photo for {product1.get('item_id', 'N/A')} is smaller than 7x7, skipping SSIM.")
+                    else:
+                        # Ensure win_size is odd
+                        win_size = win_size if win_size % 2 == 1 else win_size - 1
+                        score, _ = structural_similarity(p1_np, p2_np, full=True, data_range=p1_np.max() - p1_np.min(), win_size=win_size)
+                        if score < 0.6:
+                            issues.append("PHOTO")
+                else:
+                    logger.warning(f"Skipping photo SSIM for {product1.get('item_id', 'N/A')} due to zero-sized image after crop.")
         except Exception as e:
             logger.warning(f"Could not perform photo comparison for {product1.get('item_id', 'N/A')}: {e}")
-
+        
         return {"p1_details": p1_info, "p2_details": p2_info, "issues": issues}
 
-    # In visual_layout_backend.py -> class PracticalCatalogComparator:
-
-    def format_product_display(self, product: Dict) -> str:
-            """Formats product info for display, safely handling direct or nested values."""
-            if not product:
-                return "Product Missing"
-
-            # Helper to safely extract value, whether it's direct or from a {"value": ...} dict
-            def safe_extract(data):
-                if isinstance(data, dict):
-                    return data.get('value')
-                return data
-
-            brand = safe_extract(product.get('product_brand')) or 'Unknown Brand'
-            offer_price_val = safe_extract(product.get('offer_price'))
-            size = safe_extract(product.get('size_quantity')) or 'Unknown Size'
-
-            price_display = f"${offer_price_val}" if offer_price_val is not None else "No Price"
-
-            return f"{brand} - {price_display} - {size}"
+    def format_product_display(self, product: Optional[Dict]) -> str:
+        """Formats product info for display, safely handling direct or nested values."""
+        if not product:
+            return "Product Missing"
+        brand = self._get_val(product, 'product_brand') or 'Unknown Brand'
+        offer_price_val = self._get_val(product, 'offer_price')
+        size = self._get_val(product, 'size_quantity') or 'Unknown Size'
+        price_display = f"${offer_price_val}" if offer_price_val is not None else "No Price"
+        return f"{brand} - {price_display} - {size}"
 
     def export_practical_comparison(self, comparison_result: Dict, output_path: str):
-            """Export practical comparison results"""
+        """Export practical comparison results"""
+        if not isinstance(comparison_result.get("comparison_rows"), dict):
+            logger.error("comparison_rows is not a dictionary, cannot export.")
+            return
 
-            # === FIX 1: Correctly create the DataFrame from the dictionary values ===
-            if not isinstance(comparison_result.get("comparison_rows"), dict):
-                logger.error("comparison_rows is not a dictionary, cannot export.")
-                return
-            
-            # Use .values() to get a list of the row data
-            df_data = list(comparison_result["comparison_rows"].values())
-            if not df_data:
-                logger.warning("No comparison rows to export.")
-                df = pd.DataFrame()
-            else:
-                df = pd.DataFrame(df_data)
+        df_data = list(comparison_result.get("comparison_rows", {}).values())
+        
+        if not df_data:
+            logger.warning("No comparison rows to export.")
+            df = pd.DataFrame()
+            summary_df = pd.DataFrame({"Metric": ["Total Comparisons"], "Value": [0]})
+        else:
+            df = pd.DataFrame(df_data)
 
-            # Define columns
-            catalog1_name = comparison_result.get("catalog1_name", "Catalog1")
-            catalog2_name = comparison_result.get("catalog2_name", "Catalog2")
+        catalog1_name = comparison_result.get("catalog1_name", "Catalog1")
+        catalog2_name = comparison_result.get("catalog2_name", "Catalog2")
+        
+        # Define the desired columns for the detailed report
+        detailed_columns = [
+            "rank_c1", "rank_c2", 
+            f"{catalog1_name}_details", f"{catalog2_name}_details",
+            "issues"
+        ]
+        # Ensure essential columns exist
+        for col in detailed_columns:
+            if col not in df.columns:
+                df[col] = None
+        df = df.reindex(columns=detailed_columns)
 
-            column_order = [
-                f"{catalog1_name}_details",
-                f"{catalog2_name}_details",
-                "comparison_result",
-                "issue_type",
-                "details",
-                "price_match",
-                "brand_match",
-                "brand_similarity"
+        # Create practical summary
+        comparison_rows_dict = comparison_result.get("comparison_rows", {})
+        total_rows = len(comparison_rows_dict)
+        
+        # This is the corrected block for summary calculation
+        price_issues = len([r for r in comparison_rows_dict.values() if any("PRICE" in str(issue) for issue in r.get("issues", []))])
+        text_issues = len([r for r in comparison_rows_dict.values() if any("TEXT" in str(issue) for issue in r.get("issues", []))])
+        photo_issues = len([r for r in comparison_rows_dict.values() if "PHOTO" in r.get("issues", [])])
+        missing_p1 = len([r for r in comparison_rows_dict.values() if "MISSING_P1" in r.get("issues", [])])
+        missing_p2 = len([r for r in comparison_rows_dict.values() if "MISSING_P2" in r.get("issues", [])])
+        
+        summary_data = {
+            "Metric": [
+                "Total Comparisons Made", 
+                "Matched Products", 
+                f"Products only in {catalog1_name}", 
+                f"Products only in {catalog2_name}", 
+                "Price Mismatches", 
+                "Text Mismatches", 
+                "Photo Mismatches"
+            ],
+            "Value": [
+                total_rows, 
+                total_rows - (missing_p1 + missing_p2), 
+                missing_p2, 
+                missing_p1, 
+                price_issues, 
+                text_issues, 
+                photo_issues
             ]
+        }
+        summary_df = pd.DataFrame(summary_data)
 
-            # Ensure all columns exist
-            for col in column_order:
-                if col not in df.columns:
-                    df[col] = "N/A"
-
-            df = df.reindex(columns=column_order)
-
-            # Rename columns
-            df.columns = [
-                f"{catalog1_name} Details",
-                f"{catalog2_name} Details",
-                "Comparison Result",
-                "Issue Type",
-                "Details",
-                "Price Match",
-                "Brand Match",
-                "Brand Similarity %"
-            ]
-
-            # Create practical summary
-            total_rows = len(comparison_result["comparison_rows"])
-            correct_matches = len([r for r in comparison_result["comparison_rows"] if r.get("comparison_result", "").startswith("CORRECT")])
-            price_issues = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Price Difference"])
-            different_products = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Different Product"])
-            missing_products = len([r for r in comparison_result["comparison_rows"] if r.get("issue_type") == "Missing Product"])
-
-            summary_data = {
-                "Metric": [
-                    "Total Comparisons",
-                    "Correct Matches",
-                    "Price Issues",
-                    "Different Products",
-                    "Missing Products",
-                    "Match Rate (%)",
-                    "Price Tolerance Used",
-                    "Brand Similarity Threshold",
-                    "Comparison Focus"
-                ],
-                "Value": [
-                    total_rows,
-                    correct_matches,
-                    price_issues,
-                    different_products,
-                    missing_products,
-                    f"{(correct_matches/max(total_rows,1)*100):.1f}%",
-                    f"${comparison_result['comparison_criteria']['price_tolerance']}",
-                    f"{comparison_result['comparison_criteria']['brand_similarity_threshold']}%",
-                    comparison_result['comparison_criteria']['focus']
-                ]
-            }
-            summary_df = pd.DataFrame(summary_data)
-            
-            comparison_rows_dict = comparison_result.get("comparison_rows", {})
-
-            total_rows = len(comparison_rows_dict)
-            
-            # Use .values() in the list comprehensions
-            correct_matches = len([r for r in comparison_rows_dict.values() if r.get("comparison_result", "").startswith("CORRECT")])
-            price_issues = len([r for r in comparison_rows_dict.values() if r.get("issue_type") == "Price Difference"])
-            different_products = len([r for r in comparison_rows_dict.values() if r.get("issue_type") == "Different Product"])
-            missing_products = len([r for r in comparison_rows_dict.values() if r.get("issue_type") == "Missing Product"])
-
-
-            # Export to Excel
-            output_path = Path(output_path)
-            with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-                df.to_excel(writer, sheet_name='Practical_Comparison', index=False)
-                summary_df.to_excel(writer, sheet_name='Summary', index=False)
-
-            logger.info(f"Practical comparison exported to {output_path}")
-            print(f"\nPRACTICAL COMPARISON SUMMARY:")
-            print(f"Total comparisons: {total_rows}")
-            print(f"Correct matches: {correct_matches}")
-            print(f"Price issues: {price_issues}")
-            print(f"Different products: {different_products}")
-            print(f"Missing products: {missing_products}")
-            print(f"Match rate: {(correct_matches/max(total_rows,1)*100):.1f}%")
+        # Export to Excel
+        output_path = Path(output_path)
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            df.to_excel(writer, sheet_name='Detailed_Comparison', index=False)
+            summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        logger.info(f"Practical comparison exported to {output_path}")
 
 def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
                         catalog1_name: str = None, catalog2_name: str = None,
