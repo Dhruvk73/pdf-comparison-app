@@ -123,6 +123,10 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 frontend_results_to_display["error"] = "; ".join(map(str,pipeline_results["errors"]))
                 frontend_results_to_display["message"] = "Comparison completed with errors."
                 logging.error(f"Backend pipeline reported errors: {frontend_results_to_display['error']}")
+                
+            # Add the detailed summary from pipeline results
+            if "detailed_summary" in pipeline_results:
+                frontend_results_to_display["detailed_summary"] = pipeline_results["detailed_summary"]
 
             if "step1_pdf_processing" in pipeline_results and isinstance(pipeline_results["step1_pdf_processing"], dict):
                 pdf_proc_res = pipeline_results["step1_pdf_processing"]
@@ -165,6 +169,7 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
 
             logging.info("Frontend results processing complete.")
             return frontend_results_to_display
+        
 
         except Exception as pipeline_err:
             logging.error(f"Error during backend pipeline execution or result processing: {pipeline_err}", exc_info=True)
@@ -288,6 +293,39 @@ st.markdown("""
 
     [data-testid="metric-container"] > div > div {
         color: #000000 !important;
+    }
+    /* Fix for the green success message - COMPLETE OVERRIDE */
+    div[data-testid="stAlert"] {
+        color: #000000 !important;
+    }
+
+    div[data-testid="stAlert"] p {
+        color: #000000 !important;
+    }
+
+    div.stAlert > div {
+        color: #000000 !important;
+    }
+
+    .stAlert {
+        color: #000000 !important;
+    }
+
+    /* Fix for metrics text */
+    [data-testid="metric-container"] {
+        color: #000000 !important;
+    }
+
+    [data-testid="metric-container"] * {
+        color: #000000 !important;
+    }
+
+    div[data-testid="stMetricValue"] {
+        color: #000000 !important;
+    }
+
+    div[data-testid="stMetricLabel"] {
+        color: #4a5568 !important;
     }
 </style>
 """, unsafe_allow_html=True)
