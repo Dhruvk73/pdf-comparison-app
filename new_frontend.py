@@ -325,15 +325,24 @@ if 'comparison_results' in st.session_state:
     if results.get("error"):
         st.error(f"An error occurred during the comparison process: {results.get('error')}")
     else:
-        # --- Summary Metrics ---
+        # --- MODIFICATION: New Summary Metrics Display ---
         st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:1.25rem; margin-bottom:0.75rem;'>Comparison Summary</h2>", unsafe_allow_html=True)
-        col_m1, col_m2, col_m3 = st.columns(3)
-        col_m1.metric(label=f"Products in {st.session_state.get('file1_name', 'File 1')}", value=results.get("product_items_file1_count", "N/A"))
-        col_m2.metric(label=f"Products in {st.session_state.get('file2_name', 'File 2')}", value=results.get("product_items_file2_count", "N/A"))
-        num_issues = len(results.get("product_comparison_details", []))
-        col_m3.metric(label="Discrepancies Found", value=num_issues)
+
+        summary = results.get("detailed_summary", {})
+        total_mistakes = summary.get("total_mistakes", "N/A")
+        price_mistakes = summary.get("price_mistakes", "N/A")
+        text_mistakes = summary.get("text_mistakes", "N/A")
+        photo_mistakes = summary.get("photo_mistakes", "N/A")
+
+        col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+        col_m1.metric(label="Total Discrepancies", value=total_mistakes)
+        col_m2.metric(label="Price Mistakes", value=price_mistakes)
+        col_m3.metric(label="Text Mistakes", value=text_mistakes)
+        col_m4.metric(label="Photo Mistakes", value=photo_mistakes)
 
         # --- Visual Comparison Section (Full Pages) ---
+        # This section remains IDENTICAL. It will automatically display the new
+        # images with specific highlights because the backend now generates them.
         highlighted_pages_file1 = st.session_state.get('highlighted_pages_file1', [])
         highlighted_pages_file2 = st.session_state.get('highlighted_pages_file2', [])
 
@@ -341,7 +350,7 @@ if 'comparison_results' in st.session_state:
            (highlighted_pages_file2 and any(img for img in highlighted_pages_file2)):
             
             st.markdown("<h2 class='main-title' style='font-size: 1.375rem; margin-top:2.5rem; margin-bottom:0.5rem;'>Visual Page Analysis</h2>", unsafe_allow_html=True)
-            st.markdown(f"<p class='subtitle' style='margin-bottom:1.5rem;'>Detected product boxes are shown for each page. Errors are highlighted in red.</p>", unsafe_allow_html=True)
+            st.markdown(f"<p class='subtitle' style='margin-bottom:1.5rem;'>Detected discrepancies are highlighted on each page. Red for price, Orange for text, Purple for photo.</p>", unsafe_allow_html=True)
 
             num_pages_to_display = max(len(highlighted_pages_file1), len(highlighted_pages_file2))
 
@@ -351,7 +360,7 @@ if 'comparison_results' in st.session_state:
                 
                 col1, col2 = st.columns(2)
 
-                # --- CORRECTED HTML/Markdown for PDF 1 ---
+                # PDF 1 Display
                 with col1:
                     if page_idx < len(highlighted_pages_file1) and highlighted_pages_file1[page_idx]:
                         st.markdown(f"""
@@ -366,7 +375,7 @@ if 'comparison_results' in st.session_state:
                     else:
                         st.info(f"No visualization available for {st.session_state.get('file1_name', 'File 1')} - Page {page_idx + 1}.")
 
-                # --- CORRECTED HTML/Markdown for PDF 2 ---
+                # PDF 2 Display
                 with col2:
                     if page_idx < len(highlighted_pages_file2) and highlighted_pages_file2[page_idx]:
                         st.markdown(f"""
