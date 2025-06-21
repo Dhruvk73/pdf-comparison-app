@@ -1156,9 +1156,13 @@ class PracticalCatalogComparator:
             You are a precise data extraction expert for retail catalogs.
             Analyze the product image and return a JSON object with the specified fields.
             All bounding boxes must be relative to the image dimensions (top-left is [0,0]).
+            The "product_brand" is the main brand name (e.g., "Tide", "Downy", "Scott").
+            The "size_quantity" is the net weight, volume, or count (e.g., "1.47L", "12 rolls", "8 oz").
 
             JSON Schema:
             {
+                "product_brand": {"value": "Product Brand Name"},
+                "size_quantity": {"value": "Size or Quantity"},
                 "offer_price": {"value": "12.97", "bbox": [x1, y1, x2, y2]},
                 "regular_price": {"value": "15.00", "bbox": [x1, y1, x2, y2]},
                 "title": {"value": "Product Title", "bbox": [x1, y1, x2, y2]},
@@ -1167,7 +1171,9 @@ class PracticalCatalogComparator:
                 "product_status": "Product Present"
             }
 
-            - offer_price: The main sale price, usually large and at the top right.
+            - product_brand: The primary brand name of the product.
+            - size_quantity: The size, weight, volume, or count of the product.
+            - offer_price: The main sale price, usually large.
             - regular_price: The original price, often smaller and near the description.
             - title: The main product title.
             - description: The smaller descriptive text.
@@ -1504,12 +1510,22 @@ class PracticalCatalogComparator:
     def export_practical_comparison(self, comparison_result: Dict, output_path: str):
             """Export practical comparison results"""
 
-            # Create main comparison DataFrame
-            df = pd.DataFrame(comparison_result["comparison_rows"])
+            # === FIX 1: Correctly create the DataFrame from the dictionary values ===
+            if not isinstance(comparison_result.get("comparison_rows"), dict):
+                logger.error("comparison_rows is not a dictionary, cannot export.")
+                return
+            
+            # Use .values() to get a list of the row data
+            df_data = list(comparison_result["comparison_rows"].values())
+            if not df_data:
+                logger.warning("No comparison rows to export.")
+                df = pd.DataFrame()
+            else:
+                df = pd.DataFrame(df_data)
 
             # Define columns
-            catalog1_name = comparison_result["catalog1_name"]
-            catalog2_name = comparison_result["catalog2_name"]
+            catalog1_name = comparison_result.get("catalog1_name", "Catalog1")
+            catalog2_name = comparison_result.get("catalog2_name", "Catalog2")
 
             column_order = [
                 f"{catalog1_name}_details",
@@ -1573,6 +1589,17 @@ class PracticalCatalogComparator:
                 ]
             }
             summary_df = pd.DataFrame(summary_data)
+            
+            comparison_rows_dict = comparison_result.get("comparison_rows", {})
+
+            total_rows = len(comparison_rows_dict)
+            
+            # Use .values() in the list comprehensions
+            correct_matches = len([r for r in comparison_rows_dict.values() if r.get("comparison_result", "").startswith("CORRECT")])
+            price_issues = len([r for r in comparison_rows_dict.values() if r.get("issue_type") == "Price Difference"])
+            different_products = len([r for r in comparison_rows_dict.values() if r.get("issue_type") == "Different Product"])
+            missing_products = len([r for r in comparison_rows_dict.values() if r.get("issue_type") == "Missing Product"])
+
 
             # Export to Excel
             output_path = Path(output_path)
