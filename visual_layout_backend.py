@@ -292,23 +292,24 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 
 # In SCRIPT 1 - REPLACE the old function with this new one.
 
+# In SCRIPT 1 - REPLACE the previous function with this corrected version.
+
 def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                                  comparison_details: Dict, output_path: str, catalog_id: str):
     """
     Creates a visualization with LARGE, READABLE labels and highlights the SPECIFIC areas
     of mismatch (price, title, etc.) using VLM-provided bounding boxes.
+    (Version 2: Corrected for color specifier error).
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
     
     # --- 1. ENHANCED FONT AND STYLE CONFIGURATION ---
-    # Aggressively scale font size with a larger base for high-res images
     base_image_dimension = max(pil_img.width, pil_img.height)
-    label_font_size = max(40, int(base_image_dimension * 0.015)) # Larger font for labels
-    legend_font_size = max(35, int(base_image_dimension * 0.012)) # Font for legend
+    label_font_size = max(40, int(base_image_dimension * 0.015))
+    legend_font_size = max(35, int(base_image_dimension * 0.012))
 
     try:
-        # Use a bold font for better visibility if available
         font_path = "arialbd.ttf" if os.path.exists("arialbd.ttf") else "arial.ttf"
         label_font = ImageFont.truetype(font_path, label_font_size)
         legend_font = ImageFont.truetype(font_path, legend_font_size)
@@ -317,7 +318,6 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
         label_font = ImageFont.load_default()
         legend_font = ImageFont.load_default()
 
-    # Thicker borders for highlights
     error_styles = {
         "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 15},
         "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 15},
@@ -330,7 +330,7 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
 
     # --- 2. DATA PREPARATION ---
     boxes_by_rank = {idx + 1: box for idx, box in enumerate(ranked_boxes)}
-    catalog_num = catalog_id[-1] # Extracts '1' or '2' from 'c1' or 'c2'
+    catalog_num = catalog_id[-1]
     product_vlm_data_map = comparison_details.get(f"catalog{catalog_num}_products", {})
     comparison_rows_dict = comparison_details.get("comparison_rows", {})
 
@@ -350,19 +350,15 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
         if not main_box_data or not product_vlm_data:
             continue
             
-        # Get the main bounding box coordinates from the Roboflow detection
         main_box_left = int(main_box_data.get("left", 0))
         main_box_top = int(main_box_data.get("top", 0))
         main_box_right = int(main_box_data.get("right", 0))
         main_box_bottom = int(main_box_data.get("bottom", 0))
         
-        # This is the origin of the cropped image that the VLM analyzed.
-        # It's the main box corner, adjusted for the padding added during the crop.
         padding = 10 
         crop_origin_x = max(0, main_box_left - padding)
         crop_origin_y = max(0, main_box_top - padding)
 
-        # Handle MISSING product case first
         if f"MISSING_P{catalog_num}" in issues:
             style = error_styles[f"MISSING_P{catalog_num}"]
             draw.rectangle(
@@ -370,7 +366,6 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                 outline=style["color"],
                 width=style["width"]
             )
-            # Draw a large "MISSING" label
             label_text = style["label"]
             text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
             text_width = text_bbox[2] - text_bbox[0]
@@ -385,7 +380,6 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
             draw.text((label_bg_x1 + 15, label_bg_y1 + 5), label_text, fill="white", font=label_font)
             continue
 
-        # Draw specific highlights for all other issues
         for issue_type in issues:
             style = error_styles.get(issue_type)
             if not style: continue
@@ -401,33 +395,27 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
             if isinstance(field_data, dict) and 'bbox' in field_data and field_data['bbox']:
                 sub_bbox = field_data['bbox']
                 if len(sub_bbox) == 4:
-                    # ** CORRECTED COORDINATE CALCULATION **
-                    # Map the VLM's relative bbox to absolute coordinates on the full page
                     abs_x1 = crop_origin_x + sub_bbox[0]
                     abs_y1 = crop_origin_y + sub_bbox[1]
                     abs_x2 = crop_origin_x + sub_bbox[2]
                     abs_y2 = crop_origin_y + sub_bbox[3]
 
-                    # Draw the thick highlight box around the specific element
                     draw.rectangle(
                         [abs_x1, abs_y1, abs_x2, abs_y2],
                         outline=style["color"],
                         width=style["width"]
                     )
                     
-                    # Draw a large, clear label next to the highlight
                     label_text = style["label"]
                     text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
                     text_width = text_bbox[2] - text_bbox[0]
                     text_height = text_bbox[3] - text_bbox[1]
                     
-                    # Position label above the highlight, ensuring it stays within image bounds
                     label_y_pos = abs_y1 - text_height - 15
-                    if label_y_pos < 10: # If too close to the top, move it below
+                    if label_y_pos < 10:
                         label_y_pos = abs_y2 + 15
                     label_x_pos = abs_x1
 
-                    # Draw a solid background for the label for max readability
                     bg_padding = 10
                     draw.rectangle(
                         [label_x_pos - bg_padding, label_y_pos - bg_padding,
@@ -448,10 +436,13 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     legend_x = img_copy.width - legend_width - 20
     legend_y = 20
     
+    # ******** THIS IS THE CORRECTED LINE ********
     draw.rectangle(
         [legend_x, legend_y, legend_x + legend_width, legend_y + legend_height],
-        fill="rgba(255, 255, 255, 0.85)", outline="black", width=3
+        fill="white", outline="black", width=3  # Changed from rgba(...) to "white"
     )
+    # *******************************************
+
     draw.text((legend_x + 15, legend_y + 15), "LEGEND", fill="black", font=legend_font)
     
     for i, (label, color) in enumerate(legend_items):
