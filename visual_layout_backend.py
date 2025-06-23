@@ -299,8 +299,8 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     draw = ImageDraw.Draw(img_copy)
     
     # Calculate font size based on image size for better scaling
-    base_font_size = max(60, int(pil_img.height * 0.02))  # At least 60px
-    label_font_size = max(50, int(pil_img.height * 0.015))  # At least 50px
+    base_font_size = max(80, int(pil_img.height * 0.03))  # Increased from 60 and 0.02
+    label_font_size = max(70, int(pil_img.height * 0.025))  # Increased from 50 and 0.015
     
     # Try to load fonts with calculated sizes
     try:
@@ -316,13 +316,13 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
 
     # Error type colors and labels with thicker lines
     error_styles = {
-        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 12},
-        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 12},
-        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 12},
-        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 12},
-        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 12},
-        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 15},
-        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 15}
+        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 16},
+        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 16},
+        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 16},
+        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 16},
+        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 16},
+        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 20},
+        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 20}
     }
 
     # Create lookup map
@@ -368,16 +368,16 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
             text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
             text_width = text_bbox[2] - text_bbox[0]
             text_height = text_bbox[3] - text_bbox[1]
-            
+
             label_x = main_box_left + (main_box_right - main_box_left - text_width) // 2
-            label_y = main_box_top - text_height - 20
-            
+            label_y = main_box_top - text_height - 30  # Increased gap from 20
+
             # White background with black border
-            padding = 15
+            padding = 25  # Increased from 15
             draw.rectangle(
                 [label_x - padding, label_y - padding,
-                 label_x + text_width + padding, label_y + text_height + padding],
-                fill="white", outline="black", width=4
+                label_x + text_width + padding, label_y + text_height + padding],
+                fill="white", outline="black", width=6  # Increased border width from 4
             )
             draw.text((label_x, label_y), label_text, fill="black", font=label_font)
             continue
@@ -431,7 +431,7 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                         label_y = abs_y1 + 10
                     
                     # Draw label background
-                    padding = 15
+                    padding = 20
                     draw.rectangle(
                         [label_x - padding, label_y - padding,
                          label_x + text_width + padding, label_y + text_height + padding],
@@ -442,14 +442,15 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                     draw.text((label_x, label_y), label_text, fill=style["color"], font=label_font)
 
     # Add large legend
-    legend_size = max(300, int(pil_img.width * 0.1))
-    legend_x = pil_img.width - legend_size - 30
-    legend_y = 30
-    
+    # Add large legend
+    legend_size = max(400, int(pil_img.width * 0.15))  # Increased from 300 and 0.1
+    legend_x = pil_img.width - legend_size - 40  # Increased margin from 30
+    legend_y = 40  # Increased from 30
+
     # Legend background
     draw.rectangle(
-        [legend_x, legend_y, legend_x + legend_size, legend_y + 250],
-        fill="white", outline="black", width=4
+        [legend_x, legend_y, legend_x + legend_size, legend_y + 350],  # Increased height from 250
+        fill="white", outline="black", width=6  # Increased border width from 4
     )
     
     # Legend title
@@ -463,14 +464,14 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     ]
     
     for i, (label, color) in enumerate(legend_items):
-        y_pos = legend_y + 80 + i * 45
+        y_pos = legend_y + 100 + i * 60  # Increased spacing from 80 + i * 45
         # Color box
         draw.rectangle(
-            [legend_x + 20, y_pos, legend_x + 50, y_pos + 30],
+            [legend_x + 20, y_pos, legend_x + 60, y_pos + 40],  # Increased box size
             fill=color, outline=color
         )
         # Label text
-        draw.text((legend_x + 60, y_pos), label, fill="black", font=label_font)
+        draw.text((legend_x + 70, y_pos + 5), label, fill="black", font=label_font)  # Adjusted position
 
     img_copy.save(output_path, "JPEG", quality=95)
     logger.info(f"Generated visualization with large labels at: {output_path}")
