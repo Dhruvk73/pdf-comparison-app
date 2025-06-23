@@ -298,9 +298,9 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
     
-    # Calculate font size based on image size for better scaling
-    base_font_size = max(120, int(pil_img.height * 0.05))  # Much larger
-    label_font_size = max(100, int(pil_img.height * 0.04))  # Much larger
+    # Calculate font size based on image size - more moderate scaling
+    base_font_size = max(40, int(pil_img.height * 0.012))  # Reduced from 0.05
+    label_font_size = max(35, int(pil_img.height * 0.010))  # Reduced from 0.04
     
     # Try to load fonts with calculated sizes
     font_loaded = False
@@ -326,7 +326,6 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                 continue
         
         if not font_loaded:
-            # Create a large default font fallback
             logger.warning("No TrueType fonts found - will use larger box overlays")
             font = ImageFont.load_default()
             label_font = font
@@ -335,15 +334,15 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
         font = ImageFont.load_default()
         label_font = font
 
-    # Error type colors and labels with thicker lines
+    # Error type colors and labels with visible but not overwhelming lines
     error_styles = {
-        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 20},
-        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 20},
-        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 20},
-        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 20},
-        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 20},
-        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 25},
-        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 25}
+        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 8},
+        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 8},
+        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 8},
+        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 8},
+        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 8},
+        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 10},
+        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 10}
     }
 
     # Create lookup map
@@ -383,44 +382,47 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                 width=error_styles["MISSING_P1"]["width"]
             )
             
-            # Large label for missing
+            # Moderate-sized label for missing
             label_text = "MISSING"
-            label_width = 250  # Fixed large width
-            label_height = 100  # Fixed large height
+            label_width = 120  # Reduced from 250
+            label_height = 50  # Reduced from 100
 
             label_x = main_box_left + (main_box_right - main_box_left - label_width) // 2
-            label_y = main_box_top + (main_box_bottom - main_box_top - label_height) // 2  # Center it
+            label_y = main_box_top + (main_box_bottom - main_box_top - label_height) // 2
 
-            # Draw prominent background
+            # Draw background
             draw.rectangle(
-                [label_x - 10, label_y - 10, label_x + label_width + 10, label_y + label_height + 10],
-                fill="white", outline="black", width=10
+                [label_x - 5, label_y - 5, label_x + label_width + 5, label_y + label_height + 5],
+                fill="white", outline="black", width=4
             )
 
             # Draw inner rectangle
             draw.rectangle(
                 [label_x, label_y, label_x + label_width, label_y + label_height],
-                fill="yellow", outline="black", width=6
+                fill="yellow", outline="black", width=3
             )
 
             # Draw text in center
-            text_x = label_x + label_width // 2 - len(label_text) * 15
-            text_y = label_y + label_height // 2 - 20
+            if font_loaded:
+                try:
+                    text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
+                    text_width = text_bbox[2] - text_bbox[0]
+                    text_height = text_bbox[3] - text_bbox[1]
+                    text_x = label_x + (label_width - text_width) // 2
+                    text_y = label_y + (label_height - text_height) // 2
+                except:
+                    text_x = label_x + label_width // 2 - len(label_text) * 8
+                    text_y = label_y + label_height // 2 - 10
+            else:
+                text_x = label_x + label_width // 2 - len(label_text) * 8
+                text_y = label_y + label_height // 2 - 10
 
-            # Draw multiple times for bold effect
-            for offset_x in [-2, -1, 0, 1, 2]:
-                for offset_y in [-2, -1, 0, 1, 2]:
-                    draw.text(
-                        (text_x + offset_x, text_y + offset_y), 
-                        label_text, 
-                        fill="black", 
-                        font=label_font
-                    )
+            draw.text((text_x, text_y), label_text, fill="black", font=label_font)
             continue
 
         # Draw specific highlights
         for issue_type in issues:
-            style = error_styles.get(issue_type, {"color": "gray", "label": "Issue", "width": 10})
+            style = error_styles.get(issue_type, {"color": "gray", "label": "Issue", "width": 8})
             
             # Map issue type to field
             field_mapping = {
@@ -445,41 +447,35 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                     abs_x2 = main_box_left + sub_bbox[2]
                     abs_y2 = main_box_top + sub_bbox[3]
                     
-                    # Draw thick highlight box
+                    # Draw highlight box
                     draw.rectangle(
                         [abs_x1, abs_y1, abs_x2, abs_y2], 
                         outline=style["color"], 
                         width=style["width"]
                     )
                     
-                    # Draw label with better visibility
+                    # Draw label with appropriate size
                     label_text = style["label"]
+                    
+                    # Calculate label size based on text length
+                    label_width = max(80, len(label_text) * 15)  # Reduced multiplier
+                    label_height = 40  # Fixed moderate height
 
-                    # Always use overlay approach for maximum visibility
-                    label_width = max(200, len(label_text) * 35)  # Much larger
-                    label_height = 80  # Fixed large height
-
-                    # Position label at the top center of the box
+                    # Position label above the box
                     label_x = abs_x1 + (abs_x2 - abs_x1 - label_width) // 2
-                    label_y = abs_y1 - label_height - 20
+                    label_y = abs_y1 - label_height - 10
 
-                    # If too close to top edge, place inside the box
-                    if label_y < 10:
-                        label_y = abs_y1 + 20
+                    # If too close to top edge, place inside the box at top
+                    if label_y < 5:
+                        label_y = abs_y1 + 5
 
                     # Draw white background with colored border
                     draw.rectangle(
                         [label_x, label_y, label_x + label_width, label_y + label_height],
-                        fill="white", outline=style["color"], width=8
+                        fill="white", outline=style["color"], width=4
                     )
 
-                    # Draw a second inner rectangle for emphasis
-                    draw.rectangle(
-                        [label_x + 4, label_y + 4, label_x + label_width - 4, label_y + label_height - 4],
-                        outline=style["color"], width=4
-                    )
-
-                    # Calculate text position (centered in the box)
+                    # Calculate text position
                     if font_loaded:
                         try:
                             text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
@@ -488,48 +484,29 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                             text_x = label_x + (label_width - text_width) // 2
                             text_y = label_y + (label_height - text_height) // 2
                         except:
-                            # Fallback for textbbox
-                            text_x = label_x + label_width // 2 - len(label_text) * 10
-                            text_y = label_y + label_height // 2 - 10
+                            text_x = label_x + label_width // 2 - len(label_text) * 6
+                            text_y = label_y + label_height // 2 - 8
                     else:
-                        # For default font, estimate position
-                        text_x = label_x + label_width // 2 - len(label_text) * 10
-                        text_y = label_y + label_height // 2 - 10
+                        text_x = label_x + label_width // 2 - len(label_text) * 6
+                        text_y = label_y + label_height // 2 - 8
 
-                    # Draw the text multiple times for boldness effect
-                    for offset_x in [-1, 0, 1]:
-                        for offset_y in [-1, 0, 1]:
-                            draw.text(
-                                (text_x + offset_x, text_y + offset_y), 
-                                label_text, 
-                                fill=style["color"], 
-                                font=label_font
-                            )
+                    # Draw the text
+                    draw.text((text_x, text_y), label_text, fill=style["color"], font=label_font)
 
-    # Add large legend
-    legend_size = max(500, int(pil_img.width * 0.2))  # Even larger
-    legend_x = pil_img.width - legend_size - 50
-    legend_y = 50
+    # Add appropriately sized legend
+    legend_width = max(250, int(pil_img.width * 0.1))  # Reduced from 0.2
+    legend_height = 250  # Fixed height
+    legend_x = pil_img.width - legend_width - 30
+    legend_y = 30
 
-    # Legend background with thick border
+    # Legend background
     draw.rectangle(
-        [legend_x - 10, legend_y - 10, legend_x + legend_size + 10, legend_y + 400 + 10],
-        fill="black", width=10
-    )
-    draw.rectangle(
-        [legend_x, legend_y, legend_x + legend_size, legend_y + 400],
-        fill="white", outline="black", width=6
+        [legend_x, legend_y, legend_x + legend_width, legend_y + legend_height],
+        fill="white", outline="black", width=4
     )
 
-    # Legend title with larger text
-    title_text = "ERROR LEGEND"
-    draw.rectangle(
-        [legend_x + 20, legend_y + 20, legend_x + legend_size - 20, legend_y + 80],
-        fill="black"
-    )
-    # Multiple text draws for bold effect
-    for i in range(3):
-        draw.text((legend_x + legend_size//2 - 80, legend_y + 35 + i), title_text, fill="white", font=label_font)
+    # Legend title
+    draw.text((legend_x + 20, legend_y + 15), "ERROR LEGEND", fill="black", font=label_font)
 
     legend_items = [
         ("Price Issues", "#FF0000"),
@@ -539,15 +516,14 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     ]
 
     for i, (label, color) in enumerate(legend_items):
-        y_pos = legend_y + 120 + i * 70  # More spacing
-        # Larger color box
+        y_pos = legend_y + 60 + i * 45
+        # Color box
         draw.rectangle(
-            [legend_x + 30, y_pos, legend_x + 80, y_pos + 50],
-            fill=color, outline=color, width=3
+            [legend_x + 20, y_pos, legend_x + 45, y_pos + 25],
+            fill=color, outline=color
         )
-        # Label text (multiple draws for boldness)
-        for offset in range(2):
-            draw.text((legend_x + 100, y_pos + 10 + offset), label, fill="black", font=label_font)
+        # Label text
+        draw.text((legend_x + 55, y_pos + 3), label, fill="black", font=label_font)
 
     img_copy.save(output_path, "JPEG", quality=95)
     logger.info(f"Generated visualization with large labels at: {output_path}")
