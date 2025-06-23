@@ -299,30 +299,48 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     draw = ImageDraw.Draw(img_copy)
     
     # Calculate font size based on image size for better scaling
-    base_font_size = max(80, int(pil_img.height * 0.03))  # Increased from 60 and 0.02
-    label_font_size = max(70, int(pil_img.height * 0.025))  # Increased from 50 and 0.015
     
+    base_font_size = max(120, int(pil_img.height * 0.05))  # Much larger
+    label_font_size = max(100, int(pil_img.height * 0.04))  # Much larger
+    
+    # Try to load fonts with calculated sizes
     # Try to load fonts with calculated sizes
     try:
         from PIL import ImageFont
-        font = ImageFont.truetype("arial.ttf", base_font_size)
-        label_font = ImageFont.truetype("arial.ttf", label_font_size)
+        # Try multiple font options for better compatibility
+        font_options = ["arial.ttf", "Arial.ttf", "DejaVuSans.ttf", "Liberation-Sans.ttf"]
+        font_loaded = False
+        
+        for font_name in font_options:
+            try:
+                font = ImageFont.truetype(font_name, base_font_size)
+                label_font = ImageFont.truetype(font_name, label_font_size)
+                font_loaded = True
+                break
+            except:
+                continue
+        
+        if not font_loaded:
+            # If no TrueType fonts work, use default but scale up the drawing
+            font = ImageFont.load_default()
+            label_font = font
+            # We'll compensate by drawing larger rectangles
+            logger.warning("Using default font - will use larger boxes for visibility")
     except:
-        # If truetype fails, create a default font (this will be smaller but visible)
         font = ImageFont.load_default()
         label_font = font
-        # Log that we're using default font
         logger.warning("Using default font - labels may be smaller than intended")
 
     # Error type colors and labels with thicker lines
+    # Error type colors and labels with thicker lines
     error_styles = {
-        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 16},
-        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 16},
-        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 16},
-        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 16},
-        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 16},
-        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 20},
-        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 20}
+        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 20},
+        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 20},
+        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 20},
+        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 20},
+        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 20},
+        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 25},
+        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 25}
     }
 
     # Create lookup map
@@ -417,29 +435,54 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                     )
                     
                     # Draw label with large font
-                    label_text = style["label"]
-                    text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-                    
-                    # Position label above the box
-                    label_x = abs_x1 + (abs_x2 - abs_x1 - text_width) // 2
-                    label_y = abs_y1 - text_height - 20
-                    
-                    # If too close to top, place inside
-                    if label_y < 20:
-                        label_y = abs_y1 + 10
-                    
-                    # Draw label background
-                    padding = 20
-                    draw.rectangle(
-                        [label_x - padding, label_y - padding,
-                         label_x + text_width + padding, label_y + text_height + padding],
-                        fill="white", outline=style["color"], width=4
-                    )
-                    
-                    # Draw label text
-                    draw.text((label_x, label_y), label_text, fill=style["color"], font=label_font)
+                    # When drawing labels, make the boxes bigger
+# Replace the label drawing section with this:
+
+# Draw label with large font
+    label_text = style["label"]
+
+    # If using default font, make the box extra large
+    if isinstance(font, type(ImageFont.load_default())):
+        # Create a much larger box for default font
+        box_width = max(150, len(label_text) * 25)
+        box_height = 60
+        
+        label_x = abs_x1 + (abs_x2 - abs_x1 - box_width) // 2
+        label_y = abs_y1 - box_height - 30
+        
+        # Draw large background box
+        draw.rectangle(
+            [label_x, label_y, label_x + box_width, label_y + box_height],
+            fill="white", outline=style["color"], width=8
+        )
+        
+        # Draw text centered in the box (even if small)
+        text_x = label_x + (box_width - len(label_text) * 10) // 2
+        text_y = label_y + 20
+        draw.text((text_x, text_y), label_text, fill=style["color"], font=label_font)
+    else:
+        # Use the TrueType font measurements
+        text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
+        
+        label_x = abs_x1 + (abs_x2 - abs_x1 - text_width) // 2
+        label_y = abs_y1 - text_height - 40
+        
+        # If too close to top, place inside
+        if label_y < 20:
+            label_y = abs_y1 + 20
+        
+        # Draw label background with extra padding
+        padding = 30  # Even more padding
+        draw.rectangle(
+            [label_x - padding, label_y - padding,
+            label_x + text_width + padding, label_y + text_height + padding],
+            fill="white", outline=style["color"], width=8
+        )
+        
+        # Draw label text
+        draw.text((label_x, label_y), label_text, fill=style["color"], font=label_font)
 
     # Add large legend
     # Add large legend
