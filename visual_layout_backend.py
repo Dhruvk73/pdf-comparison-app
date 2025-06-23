@@ -289,192 +289,105 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
     os.remove(temp_img_path)
     return sortable_boxes, saved_cropped_files
 
+# In SCRIPT 1
+
+# In visual_layout_backend.py
+# Replace the ENTIRE create_ranking_visualization function with this one.
 
 def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                                  comparison_details: Dict, output_path: str, catalog_id: str):
     """
-    Creates a visualization with LARGE, READABLE labels positioned correctly.
+    Creates a visualization with specific highlights for each error type.
+    This version correctly handles the dictionary structure of comparison_rows.
+    
+    Args:
+        pil_img: The full page PIL image.
+        ranked_boxes: List of detected product boxes with their page coordinates.
+        comparison_details: The rich comparison result from the VLM step for this page.
+        output_path: Where to save the generated image.
+        catalog_id: 'c1' or 'c2', to know which catalog's data to use for highlighting.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
     
-    # Calculate font size based on image size for better scaling
-    base_font_size = max(60, int(pil_img.height * 0.02))  # At least 60px
-    label_font_size = max(50, int(pil_img.height * 0.015))  # At least 50px
-    
-    # Try to load fonts with calculated sizes
     try:
-        from PIL import ImageFont
-        font = ImageFont.truetype("arial.ttf", base_font_size)
-        label_font = ImageFont.truetype("arial.ttf", label_font_size)
-    except:
-        # If truetype fails, create a default font (this will be smaller but visible)
+        font = ImageFont.truetype("arial.ttf", 24)
+    except IOError:
         font = ImageFont.load_default()
-        label_font = font
-        # Log that we're using default font
-        logger.warning("Using default font - labels may be smaller than intended")
 
-    # Error type colors and labels with thicker lines
-    error_styles = {
-        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 12},
-        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 12},
-        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 12},
-        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 12},
-        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 12},
-        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 15},
-        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 15}
+    error_colors = {
+        "PRICE_OFFER": "red", "PRICE_REGULAR": "red",
+        "TEXT_TITLE": "orange", "TEXT_DESCRIPTION": "yellow",
+        "PHOTO": "purple", "MISSING": "black"
     }
 
-    # Create lookup map
+    # Create a quick lookup map for the original detected boxes by their rank
     boxes_by_rank = {idx + 1: box for idx, box in enumerate(ranked_boxes)}
     
-    catalog_num = catalog_id[-1]
+    # Get the necessary data from the comparison results payload
+    catalog_num = catalog_id[-1] # Extracts '1' from 'c1' or '2' from 'c2'
     product_vlm_data_map = comparison_details.get(f"catalog{catalog_num}_products", {})
     comparison_rows_dict = comparison_details.get("comparison_rows", {})
 
-    # Process each comparison row
+    # --- FIX: Iterate over the comparison_rows dictionary correctly ---
     for row_data in comparison_rows_dict.values():
-        issues = row_data.get("issues", [])
+        issues = row_data.get("issues")
         if not issues:
-            continue
+            continue # Nothing to highlight for this comparison row
 
+        # Determine the rank of the product in THIS specific catalog ('c1' or 'c2')
         rank_in_this_catalog = row_data.get(f"rank_c{catalog_num}")
+        
         if not rank_in_this_catalog:
+            # This comparison row (e.g., a product missing from c1) is not relevant
+            # for the current visualization (e.g., the c1 page).
             continue
 
+        # Get the corresponding product box and VLM data using the rank
         main_box_data = boxes_by_rank.get(rank_in_this_catalog)
         product_vlm_data = product_vlm_data_map.get(rank_in_this_catalog)
 
         if not main_box_data or not product_vlm_data:
-            continue
+            continue # Sanity check
 
         main_box_left = int(main_box_data.get("left", 0))
         main_box_top = int(main_box_data.get("top", 0))
-        main_box_right = int(main_box_data.get("right", 0))
-        main_box_bottom = int(main_box_data.get("bottom", 0))
 
-        # Handle missing products
-        is_missing_issue = f"MISSING_P{catalog_num}" in issues
+        # --- Highlighting Logic (remains the same, now correctly targeted) ---
+        is_missing_issue = any(f"MISSING_C{catalog_num}" in s for s in issues)
         if is_missing_issue:
+            # This product exists, but its counterpart is missing. Highlight the whole box.
             draw.rectangle(
-                [main_box_left, main_box_top, main_box_right, main_box_bottom],
-                outline=error_styles["MISSING_P1"]["color"], 
-                width=error_styles["MISSING_P1"]["width"]
+                [main_box_left, main_box_top, int(main_box_data.get("right",0)), int(main_box_data.get("bottom",0))],
+                outline=error_colors["MISSING"], width=6
             )
-            
-            # Large label for missing
-            label_text = "MISSING"
-            # Create a background rectangle for the label
-            text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_height = text_bbox[3] - text_bbox[1]
-            
-            label_x = main_box_left + (main_box_right - main_box_left - text_width) // 2
-            label_y = main_box_top - text_height - 20
-            
-            # White background with black border
-            padding = 15
-            draw.rectangle(
-                [label_x - padding, label_y - padding,
-                 label_x + text_width + padding, label_y + text_height + padding],
-                fill="white", outline="black", width=4
-            )
-            draw.text((label_x, label_y), label_text, fill="black", font=label_font)
             continue
 
-        # Draw specific highlights
+        # Draw specific highlight boxes for each individual issue
         for issue_type in issues:
-            style = error_styles.get(issue_type, {"color": "gray", "label": "Issue", "width": 10})
-            
-            # Map issue type to field
-            field_mapping = {
-                "PRICE_OFFER": "offer_price",
-                "PRICE_REGULAR": "regular_price",
-                "TEXT_TITLE": "title",
-                "TEXT_DESCRIPTION": "description",
-                "PHOTO": "photo_area"
-            }
-            
-            field_key = field_mapping.get(issue_type)
-            if not field_key:
+            if issue_type.startswith("PRICE"):
+                key = "offer_price" if issue_type == "PRICE_OFFER" else "regular_price"
+            elif issue_type.startswith("TEXT"):
+                key = "title" if issue_type == "TEXT_TITLE" else "description"
+            elif issue_type == "PHOTO":
+                key = "photo_area"
+            else:
                 continue
 
-            field_data = product_vlm_data.get(field_key)
-            if isinstance(field_data, dict) and 'bbox' in field_data:
-                sub_bbox = field_data['bbox']
-                if sub_bbox and len(sub_bbox) == 4:
-                    # Convert relative coordinates to absolute
-                    abs_x1 = main_box_left + sub_bbox[0]
-                    abs_y1 = main_box_top + sub_bbox[1]
-                    abs_x2 = main_box_left + sub_bbox[2]
-                    abs_y2 = main_box_top + sub_bbox[3]
-                    
-                    # Draw thick highlight box
-                    draw.rectangle(
-                        [abs_x1, abs_y1, abs_x2, abs_y2], 
-                        outline=style["color"], 
-                        width=style["width"]
-                    )
-                    
-                    # Draw label with large font
-                    label_text = style["label"]
-                    text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-                    
-                    # Position label above the box
-                    label_x = abs_x1 + (abs_x2 - abs_x1 - text_width) // 2
-                    label_y = abs_y1 - text_height - 20
-                    
-                    # If too close to top, place inside
-                    if label_y < 20:
-                        label_y = abs_y1 + 10
-                    
-                    # Draw label background
-                    padding = 15
-                    draw.rectangle(
-                        [label_x - padding, label_y - padding,
-                         label_x + text_width + padding, label_y + text_height + padding],
-                        fill="white", outline=style["color"], width=4
-                    )
-                    
-                    # Draw label text
-                    draw.text((label_x, label_y), label_text, fill=style["color"], font=label_font)
+            field_data = product_vlm_data.get(key)
+            sub_bbox = field_data.get('bbox') if isinstance(field_data, dict) else None
 
-    # Add large legend
-    legend_size = max(300, int(pil_img.width * 0.1))
-    legend_x = pil_img.width - legend_size - 30
-    legend_y = 30
-    
-    # Legend background
-    draw.rectangle(
-        [legend_x, legend_y, legend_x + legend_size, legend_y + 250],
-        fill="white", outline="black", width=4
-    )
-    
-    # Legend title
-    draw.text((legend_x + 20, legend_y + 20), "LEGEND", fill="black", font=label_font)
-    
-    legend_items = [
-        ("Price Issues", "#FF0000"),
-        ("Text Issues", "#FF8C00"),
-        ("Photo Issues", "#9370DB"),
-        ("Missing Product", "#000000")
-    ]
-    
-    for i, (label, color) in enumerate(legend_items):
-        y_pos = legend_y + 80 + i * 45
-        # Color box
-        draw.rectangle(
-            [legend_x + 20, y_pos, legend_x + 50, y_pos + 30],
-            fill=color, outline=color
-        )
-        # Label text
-        draw.text((legend_x + 60, y_pos), label, fill="black", font=label_font)
+            if sub_bbox and len(sub_bbox) == 4:
+                # Translate relative bbox to absolute page coordinates
+                abs_x1 = main_box_left + sub_bbox[0]
+                abs_y1 = main_box_top + sub_bbox[1]
+                abs_x2 = main_box_left + sub_bbox[2]
+                abs_y2 = main_box_top + sub_bbox[3]
+                
+                draw.rectangle([abs_x1, abs_y1, abs_x2, abs_y2], outline=error_colors.get(issue_type, "cyan"), width=4)
 
-    img_copy.save(output_path, "JPEG", quality=95)
-    logger.info(f"Generated visualization with large labels at: {output_path}")
-    
+    img_copy.save(output_path, "JPEG", quality=90)
+    logger.info(f"Generated specific highlights visualization at: {output_path}")
 # In SCRIPT 1
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
@@ -1783,48 +1696,6 @@ def catalog_comparison_pipeline(
 
         pipeline_results["step3_vlm_comparison"] = comparison_results
 
-          # Calculate detailed summary
-        total_mistakes = 0
-        price_mistakes = 0
-        text_mistakes = 0
-        photo_mistakes = 0
-        missing_products = 0
-
-        if pipeline_results.get("step3_vlm_comparison"):
-            all_vlm_results = pipeline_results["step3_vlm_comparison"]
-            
-            for page_key, page_data in all_vlm_results.items():
-                if "results" in page_data and isinstance(page_data["results"], dict):
-                    comparison_rows = page_data["results"].get("comparison_rows", {})
-                    
-                    for row_key, row_data in comparison_rows.items():
-                        if isinstance(row_data, dict):
-                            issues = row_data.get("issues", [])
-                            
-                            for issue in issues:
-                                total_mistakes += 1
-                                
-                                if issue in ["PRICE_OFFER", "PRICE_REGULAR"]:
-                                    price_mistakes += 1
-                                elif issue in ["TEXT_TITLE", "TEXT_DESCRIPTION"]:
-                                    text_mistakes += 1
-                                elif issue == "PHOTO":
-                                    photo_mistakes += 1
-                                elif issue in ["MISSING_P1", "MISSING_P2"]:
-                                    missing_products += 1
-
-        # Add to pipeline results
-        pipeline_results["detailed_summary"] = {
-            "total_mistakes": total_mistakes,
-            "price_mistakes": price_mistakes,
-            "text_mistakes": text_mistakes,
-            "photo_mistakes": photo_mistakes,
-            "missing_products": missing_products
-        }
-
-        logger.info(f"Summary - Total: {total_mistakes}, Price: {price_mistakes}, "
-                f"Text: {text_mistakes}, Photo: {photo_mistakes}, Missing: {missing_products}")
-        
 
         if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"]:
             vlm_all_pages_data = pipeline_results["step3_vlm_comparison"]
@@ -1926,9 +1797,46 @@ def catalog_comparison_pipeline(
             
         
         
-     
+        total_mistakes = 0
+        price_mistakes = 0
+        text_mistakes = 0
+        photo_mistakes = 0
         
-        
+        all_comparison_details_for_frontend = []
+
+        if pipeline_results.get("step3_vlm_comparison"):
+            all_vlm_results = pipeline_results["step3_vlm_comparison"]
+            for page_num, page_data in all_vlm_results.items():
+                if "results" in page_data:
+                    comparison_rows = page_data["results"].get("comparison_rows", [])
+                    
+                    # Re-create the structure the frontend expects, but with more detail
+                    # This part is complex, as it needs to align with how frontend will show it.
+                    # For now, let's just count errors.
+                    
+                    for row in comparison_rows.values():  # Note the addition of .values()
+                        issues = row.get("issues", [])
+                        if issues:
+                            total_mistakes += len(issues)
+                            if any("PRICE" in s for s in issues):
+                                price_mistakes += 1
+                            if any("TEXT" in s for s in issues):
+                                text_mistakes += 1
+                            if "PHOTO" in issues:
+                                photo_mistakes += 1
+                                
+                    # Call the NEW visualization function after comparison
+                    # (This logic needs to be integrated carefully into your pipeline)
+
+
+        # Add the new summary to the results payload
+        pipeline_results["detailed_summary"] = {
+            "total_mistakes": total_mistakes,
+            "price_mistakes": price_mistakes,
+            "text_mistakes": text_mistakes,
+            "photo_mistakes": photo_mistakes
+        }
+
         # ==============================
         # STEP 4: CONSOLIDATE RESULTS
         # ==============================
