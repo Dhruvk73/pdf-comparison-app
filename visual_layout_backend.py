@@ -479,24 +479,21 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                         'text_height': text_height
                     })
 
-        # Position labels to avoid overlap
+        # Position labels inside the main product box (top-right corner) to avoid confusion
         label_y_offset = 0
         for label_info in product_labels:
             abs_x1, abs_y1, abs_x2, abs_y2 = label_info['bbox']
             
-            # Position label above the box, stacked if multiple
-            label_x = abs_x1 + (abs_x2 - abs_x1 - label_info['width']) // 2
-            label_y = abs_y1 - label_info['height'] - 10 - label_y_offset
-
-            # If too close to top edge, place inside the box at top
-            if label_y < 5:
-                label_y = abs_y1 + 5 + label_y_offset
-
-            # Ensure label doesn't go outside image bounds
-            if label_x < 0:
-                label_x = 5
-            elif label_x + label_info['width'] > pil_img.width:
-                label_x = pil_img.width - label_info['width'] - 5
+            # Position label in the top-right corner of the MAIN product box, not the sub-element
+            # This ensures labels are clearly associated with the correct product
+            label_x = main_box_right - label_info['width'] - 10  # 10px from right edge
+            label_y = main_box_top + 10 + label_y_offset  # 10px from top edge, stacked if multiple
+            
+            # Ensure label stays within the main product box bounds
+            if label_x < main_box_left + 5:
+                label_x = main_box_left + 5
+            if label_y + label_info['height'] > main_box_bottom - 5:
+                label_y = main_box_bottom - label_info['height'] - 5
 
             # Draw white background with colored border
             draw.rectangle(
