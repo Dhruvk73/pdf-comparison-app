@@ -486,8 +486,8 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
             
             # Position label in the top-right corner of the MAIN product box, not the sub-element
             # This ensures labels are clearly associated with the correct product
-            label_x = main_box_right - label_info['width'] - 10  # 10px from right edge
-            label_y = main_box_top + 10 + label_y_offset  # 10px from top edge, stacked if multiple
+            label_x = main_box_left + 10   
+            label_y = main_box_top + 10 + label_y_offset    
             
             # Ensure label stays within the main product box bounds
             if label_x < main_box_left + 5:
