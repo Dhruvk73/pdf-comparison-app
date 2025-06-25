@@ -293,14 +293,14 @@ def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page
 def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                                  comparison_details: Dict, output_path: str, catalog_id: str):
     """
-    Creates a visualization with LARGE, READABLE labels positioned correctly.
+    Creates a visualization with properly sized labels and no overlapping text.
     """
     img_copy = pil_img.copy()
     draw = ImageDraw.Draw(img_copy)
     
     # Calculate font size based on image size - more moderate scaling
-    base_font_size = max(40, int(pil_img.height * 0.012))  # Reduced from 0.05
-    label_font_size = max(35, int(pil_img.height * 0.010))  # Reduced from 0.04
+    base_font_size = max(40, int(pil_img.height * 0.012))
+    label_font_size = max(35, int(pil_img.height * 0.010))
     
     # Try to load fonts with calculated sizes
     font_loaded = False
@@ -352,6 +352,17 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
     product_vlm_data_map = comparison_details.get(f"catalog{catalog_num}_products", {})
     comparison_rows_dict = comparison_details.get("comparison_rows", {})
 
+    # Helper function to get text dimensions
+    def get_text_dimensions(text, font):
+        if font_loaded:
+            try:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                return bbox[2] - bbox[0], bbox[3] - bbox[1]
+            except:
+                return len(text) * 12, 20
+        else:
+            return len(text) * 12, 20
+
     # Process each comparison row
     for row_data in comparison_rows_dict.values():
         issues = row_data.get("issues", [])
@@ -382,10 +393,13 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                 width=error_styles["MISSING_P1"]["width"]
             )
             
-            # Moderate-sized label for missing
+            # Properly sized label for missing
             label_text = "MISSING"
-            label_width = 120  # Reduced from 250
-            label_height = 50  # Reduced from 100
+            text_width, text_height = get_text_dimensions(label_text, label_font)
+            
+            # Add padding to text dimensions
+            label_width = text_width + 20
+            label_height = text_height + 16
 
             label_x = main_box_left + (main_box_right - main_box_left - label_width) // 2
             label_y = main_box_top + (main_box_bottom - main_box_top - label_height) // 2
@@ -403,23 +417,15 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
             )
 
             # Draw text in center
-            if font_loaded:
-                try:
-                    text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-                    text_width = text_bbox[2] - text_bbox[0]
-                    text_height = text_bbox[3] - text_bbox[1]
-                    text_x = label_x + (label_width - text_width) // 2
-                    text_y = label_y + (label_height - text_height) // 2
-                except:
-                    text_x = label_x + label_width // 2 - len(label_text) * 8
-                    text_y = label_y + label_height // 2 - 10
-            else:
-                text_x = label_x + label_width // 2 - len(label_text) * 8
-                text_y = label_y + label_height // 2 - 10
+            text_x = label_x + (label_width - text_width) // 2
+            text_y = label_y + (label_height - text_height) // 2
 
             draw.text((text_x, text_y), label_text, fill="black", font=label_font)
             continue
 
+        # Collect all labels for this product to avoid overlap
+        product_labels = []
+        
         # Draw specific highlights
         for issue_type in issues:
             style = error_styles.get(issue_type, {"color": "gray", "label": "Issue", "width": 8})
@@ -454,79 +460,64 @@ def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
                         width=style["width"]
                     )
                     
-                    # Draw label with appropriate size
+                    # Calculate label dimensions based on actual text size
                     label_text = style["label"]
+                    text_width, text_height = get_text_dimensions(label_text, label_font)
                     
-                    # Calculate label size based on text length
-                    label_width = max(80, len(label_text) * 15)  # Reduced multiplier
-                    label_height = 40  # Fixed moderate height
+                    # Add padding to create proper rectangle size
+                    label_width = text_width + 16
+                    label_height = text_height + 12
 
-                    # Position label above the box
-                    label_x = abs_x1 + (abs_x2 - abs_x1 - label_width) // 2
-                    label_y = abs_y1 - label_height - 10
+                    # Store label info for positioning
+                    product_labels.append({
+                        'text': label_text,
+                        'color': style["color"],
+                        'width': label_width,
+                        'height': label_height,
+                        'bbox': (abs_x1, abs_y1, abs_x2, abs_y2),
+                        'text_width': text_width,
+                        'text_height': text_height
+                    })
 
-                    # If too close to top edge, place inside the box at top
-                    if label_y < 5:
-                        label_y = abs_y1 + 5
+        # Position labels to avoid overlap
+        label_y_offset = 0
+        for label_info in product_labels:
+            abs_x1, abs_y1, abs_x2, abs_y2 = label_info['bbox']
+            
+            # Position label above the box, stacked if multiple
+            label_x = abs_x1 + (abs_x2 - abs_x1 - label_info['width']) // 2
+            label_y = abs_y1 - label_info['height'] - 10 - label_y_offset
 
-                    # Draw white background with colored border
-                    draw.rectangle(
-                        [label_x, label_y, label_x + label_width, label_y + label_height],
-                        fill="white", outline=style["color"], width=4
-                    )
+            # If too close to top edge, place inside the box at top
+            if label_y < 5:
+                label_y = abs_y1 + 5 + label_y_offset
 
-                    # Calculate text position
-                    if font_loaded:
-                        try:
-                            text_bbox = draw.textbbox((0, 0), label_text, font=label_font)
-                            text_width = text_bbox[2] - text_bbox[0]
-                            text_height = text_bbox[3] - text_bbox[1]
-                            text_x = label_x + (label_width - text_width) // 2
-                            text_y = label_y + (label_height - text_height) // 2
-                        except:
-                            text_x = label_x + label_width // 2 - len(label_text) * 6
-                            text_y = label_y + label_height // 2 - 8
-                    else:
-                        text_x = label_x + label_width // 2 - len(label_text) * 6
-                        text_y = label_y + label_height // 2 - 8
+            # Ensure label doesn't go outside image bounds
+            if label_x < 0:
+                label_x = 5
+            elif label_x + label_info['width'] > pil_img.width:
+                label_x = pil_img.width - label_info['width'] - 5
 
-                    # Draw the text
-                    draw.text((text_x, text_y), label_text, fill=style["color"], font=label_font)
+            # Draw white background with colored border
+            draw.rectangle(
+                [label_x, label_y, label_x + label_info['width'], label_y + label_info['height']],
+                fill="white", outline=label_info['color'], width=4
+            )
 
-    # Add appropriately sized legend
-    legend_width = max(250, int(pil_img.width * 0.1))  # Reduced from 0.2
-    legend_height = 250  # Fixed height
-    legend_x = pil_img.width - legend_width - 30
-    legend_y = 30
+            # Calculate text position to center it in the rectangle
+            text_x = label_x + (label_info['width'] - label_info['text_width']) // 2
+            text_y = label_y + (label_info['height'] - label_info['text_height']) // 2
 
-    # Legend background
-    draw.rectangle(
-        [legend_x, legend_y, legend_x + legend_width, legend_y + legend_height],
-        fill="white", outline="black", width=4
-    )
+            # Draw the text
+            draw.text((text_x, text_y), label_info['text'], fill=label_info['color'], font=label_font)
+            
+            # Increase offset for next label to prevent overlap
+            label_y_offset += label_info['height'] + 5
 
-    # Legend title
-    draw.text((legend_x + 20, legend_y + 15), "ERROR LEGEND", fill="black", font=label_font)
-
-    legend_items = [
-        ("Price Issues", "#FF0000"),
-        ("Text Issues", "#FF8C00"),
-        ("Photo Issues", "#9370DB"),
-        ("Missing Product", "#000000")
-    ]
-
-    for i, (label, color) in enumerate(legend_items):
-        y_pos = legend_y + 60 + i * 45
-        # Color box
-        draw.rectangle(
-            [legend_x + 20, y_pos, legend_x + 45, y_pos + 25],
-            fill=color, outline=color
-        )
-        # Label text
-        draw.text((legend_x + 55, y_pos + 3), label, fill="black", font=label_font)
+    # Legend is completely removed as requested
 
     img_copy.save(output_path, "JPEG", quality=95)
-    logger.info(f"Generated visualization with large labels at: {output_path}")
+    logger.info(f"Generated visualization with properly sized labels at: {output_path}")
 
 def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
                                      ranking_method="improved_grid", filter_small_boxes=True,
