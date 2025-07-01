@@ -1,2189 +1,1995 @@
-import os
-from pdf2image import convert_from_path
-from PIL import Image, ImageDraw, ImageFont
+# backend_processor.py
+import openai
+import time
+import logging
 import tempfile
-import numpy as np
-from sklearn.cluster import KMeans
-import math
-from pathlib import Path
-import cv2
-from typing import List, Optional, Tuple
-import re
 import json
+import re
+import boto3
+from dotenv import load_dotenv
+import os
 import pandas as pd
 import io
-import base64
-import logging
-import time
-from typing import Dict, List, Optional, Tuple
-import openai
-from fuzzywuzzy import fuzz
-from skimage.metrics import structural_similarity
+from io import BytesIO
+from pdf2image import convert_from_path #, pdfinfo_from_path # pdfinfo_from_path not used in your main code
+# from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError # Not explicitly handled, convert_from_path will raise generally
+from PIL import Image
+import base64 # For Vision LLM image encoding
+from werkzeug.utils import secure_filename # Useful for sanitizing filenames for S3 keys if needed
+from PIL import ImageDraw, ImageFont
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ========================================
-# PDF PROCESSING CONFIGURATION
-# ========================================
 
-# Configure poppler path for pdf2image
-POPPLER_PATH = r'C:\Program Files\poppler-0.68.0\bin' # Default Windows path
-# For other systems, you can modify this path or set it as None to use system PATH
 
-def get_poppler_path():
-    """
-    Get the poppler path for pdf2image conversion.
-    Returns None if poppler is in system PATH or on non-Windows systems.
-    """
-    # Check if running on Windows and if the default path exists
-    if os.name == 'nt': # Windows
-        if os.path.exists(POPPLER_PATH):
-            return POPPLER_PATH
-        else:
-            # Try some common alternative paths
-            alternative_paths = [
-                r'C:\Program Files\poppler\bin',
-                r'C:\poppler\bin',
-                r'C:\poppler-0.68.0\bin',
-                r'C:\tools\poppler\bin'
-            ]
-            for path in alternative_paths:
-                if os.path.exists(path):
-                    return path
-            
-            # If no path found, print warning but continue (might work if in PATH)
-            print(f"Warning: Poppler not found at {POPPLER_PATH} or alternative paths.")
-            print("Make sure poppler is installed and either:")
-            print("1. Update POPPLER_PATH variable in the script")
-            print("2. Add poppler to your system PATH")
-            return None
+# Roboflow SDK
+ROBOFLOW_SDK_AVAILABLE = False
+Roboflow = None
+try:
+    from roboflow import Roboflow
+    ROBOFLOW_SDK_AVAILABLE = True
+except ImportError:
+    logging.warning("Could not import 'Roboflow'. Ensure 'roboflow' package is installed.")
+
+from fuzzywuzzy import fuzz
+
+load_dotenv()
+
+# --- Logger Setup ---
+# Configure logging (you can simplify or adapt your existing setup)
+logger = logging.getLogger(__name__)
+if not logger.handlers: # Avoid adding handlers multiple times
+    # Use a basicConfig that Streamlit can also pick up or override
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(), # Default to INFO, configurable via .env
+        format='%(asctime)s - %(levelname)s - PID:%(process)d - [%(name)s - %(funcName)s:%(lineno)d] - %(message)s'
+    )
+    # Set log levels for verbose libraries if needed
+    logging.getLogger('botocore').setLevel(logging.WARNING)
+    logging.getLogger('boto3').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('pdf2image').setLevel(logging.INFO)
+    logging.getLogger('PIL').setLevel(logging.INFO)
+logger.info("Backend Processor Logger Initialized.")
+
+
+# --- Geometric Merging Tolerances (Tune these based on logs) ---
+Y_ALIGN_TOLERANCE_FACTOR = 0.7
+X_SPACING_TOLERANCE_FACTOR = 1.7
+CENTS_MAX_HEIGHT_FACTOR = 1.2
+GEOM_MERGE_MIN_WORD_CONFIDENCE = 70
+
+# --- Environment variables ---
+AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID')
+AWS_SECRET_ACCESS_KEY = os.getenv('AWS_SECRET_ACCESS_KEY')
+AWS_DEFAULT_REGION = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+S3_BUCKET_NAME = os.getenv('S3_BUCKET_NAME')
+ROBOFLOW_API_KEY = os.getenv('ROBOFLOW_API_KEY')
+ROBOFLOW_PROJECT_ID = os.getenv('ROBOFLOW_PROJECT_ID')
+ROBOFLOW_VERSION_NUMBER = os.getenv('ROBOFLOW_VERSION_NUMBER')
+POPPLER_BIN_PATH = os.getenv('POPPLER_PATH_OVERRIDE', None) # For pdf2image
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+
+# --- Initialize clients (globally within this module) ---
+s3_client, textract_client, roboflow_model_object, openai_client_instance = None, None, None, None # Renamed openai_client to avoid conflict if openai is used directly
+
+try:
+    if AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and S3_BUCKET_NAME: # Added S3_BUCKET_NAME check
+        s3_client = boto3.client('s3', aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY, region_name=AWS_DEFAULT_REGION)
+        textract_client = boto3.client('textract', aws_access_key_id=AWS_ACCESS_KEY_ID, aws_secret_access_key=AWS_SECRET_ACCESS_KEY, region_name=AWS_DEFAULT_REGION)
+        logger.info(f"Boto3 clients initialized for region: {AWS_DEFAULT_REGION}.")
     else:
-        # Non-Windows systems typically have poppler in PATH
-        return None
+        logger.warning("AWS credentials or S3_BUCKET_NAME not fully configured. S3/Textract operations may fail.")
+except Exception as e:
+    logger.error(f"Error initializing Boto3 clients: {e}", exc_info=True)
 
-# ========================================
-# SCRIPT 1: PDF Processing and Ranking
-# ========================================
+if ROBOFLOW_SDK_AVAILABLE and Roboflow and ROBOFLOW_API_KEY and ROBOFLOW_PROJECT_ID and ROBOFLOW_VERSION_NUMBER:
+    try:
+        rf = Roboflow(api_key=ROBOFLOW_API_KEY)
+        project = rf.project(ROBOFLOW_PROJECT_ID)
+        roboflow_model_object = project.version(int(ROBOFLOW_VERSION_NUMBER)).model
+        logger.info(f"Roboflow model object initialized for project {ROBOFLOW_PROJECT_ID}, version {ROBOFLOW_VERSION_NUMBER}")
+    except Exception as e:
+        logger.error(f"Error initializing Roboflow model object: {e}", exc_info=True)
+        roboflow_model_object = None
+else:
+    logger.warning("Roboflow SDK not available or configuration missing. Roboflow detection will be skipped.")
+    roboflow_model_object = None
 
-def is_valid_product_box(width, height, image_width, image_height,
-                         min_width_ratio=0.08, min_height_ratio=0.08,
-                         min_area_ratio=0.01, max_aspect_ratio=5.0):
-    """
-    Determine if a bounding box represents a valid product (not a small banner/header)
-    """
-    # Calculate relative dimensions
-    width_ratio = width / image_width
-    height_ratio = height / image_height
-    area_ratio = (width * height) / (image_width * image_height)
+if OPENAI_API_KEY:
+    try:
+        openai_client_instance = openai.OpenAI(api_key=OPENAI_API_KEY) # Use the instance
+        logger.info("OpenAI client configured with API key.")
+    except Exception as e:
+        logger.error(f"Error initializing OpenAI client: {e}", exc_info=True)
+        openai_client_instance = None
+else:
+    logger.warning("OPENAI_API_KEY not found in environment variables. OpenAI calls will fail.")
 
-    # Calculate aspect ratio (prevent division by zero)
-    aspect_ratio = max(width, height) / max(min(width, height), 1)
 
-    # Apply filters
-    if width_ratio < min_width_ratio:
-        return False # Too narrow
+# --- Helper Functions (Copied and adapted from your main.py) ---
 
-    if height_ratio < min_height_ratio:
-        return False # Too short
+def is_size_value_supported_by_text(size_value_str, size_unit_str, source_text, item_id_for_log="N/A"):
+    if not size_value_str or not size_unit_str or not source_text:
+        return True # Not enough info to invalidate, assume okay or handle upstream
 
-    if area_ratio < min_area_ratio:
-        return False # Too small overall
+    source_text_lower = str(source_text).lower()
+    
+    # Check for the numeric part of the size
+    if str(size_value_str) not in source_text_lower:
+        # Allow for minor variations, e.g. "6.0" vs "6"
+        if isinstance(size_value_str, float) and int(size_value_str) == size_value_str: # e.g. 6.0
+            if str(int(size_value_str)) not in source_text_lower: # Check for "6"
+                logger.warning(f"ITEM_ID: {item_id_for_log} - Size value '{size_value_str}' (or int form) not found in source text: '{source_text_lower[:200]}...'")
+                return False
+        else:
+            logger.warning(f"ITEM_ID: {item_id_for_log} - Size value '{size_value_str}' not found in source text: '{source_text_lower[:200]}...'")
+            return False
 
-    if aspect_ratio > max_aspect_ratio:
-        return False # Too elongated (likely a banner)
-
-    # Additional absolute minimum sizes
-    if width < 80 or height < 80:
-        return False # Too small in absolute terms
-
+    # Check for the unit part (can be more sophisticated with unit normalization)
+    # This is a basic check; enhance with your unit_conversions if needed for robustness
+    normalized_unit_variants = {
+        "ct": ["ct", "count", "unidad", "unidades", "und", "un"],
+        "oz": ["oz", "onzas", "onza"],
+        # Add other common units and their variants from your normalization logic
+    }
+    
+    unit_found = False
+    if size_unit_str.lower() in source_text_lower:
+        unit_found = True
+    else:
+        for canonical, variants in normalized_unit_variants.items():
+            if size_unit_str.lower() == canonical:
+                if any(variant in source_text_lower for variant in variants):
+                    unit_found = True
+                    break
+    
+    if not unit_found:
+        logger.warning(f"ITEM_ID: {item_id_for_log} - Size unit '{size_unit_str}' (or variants) not found in source text: '{source_text_lower[:200]}...'")
+        return False
+        
+    logger.debug(f"ITEM_ID: {item_id_for_log} - Size '{size_value_str} {size_unit_str}' appears supported by source text.")
     return True
 
-def improved_grid_ranking(boxes, tolerance_factor=0.3):
-    """
-    Improved grid-based ranking that follows strict top-to-bottom, left-to-right pattern
 
-    Args:
-        boxes: List of box dictionaries with center_x, center_y
-        tolerance_factor: How much vertical tolerance to allow for "same row" (0.1-0.5)
-    """
-    if not boxes:
-        return boxes
-
-    print(f"Improved grid ranking for {len(boxes)} boxes...")
-
-    # Sort all boxes by Y coordinate first to identify rows
-    boxes_by_y = sorted(boxes, key=lambda b: b["center_y"])
-
-    # Group boxes into rows based on Y-coordinate clustering
-    rows = []
-    current_row = [boxes_by_y[0]]
-
-    for i in range(1, len(boxes_by_y)):
-        current_box = boxes_by_y[i]
-        last_box_in_row = current_row[-1]
-
-        # Calculate dynamic tolerance based on box heights
-        avg_height = np.mean([b.get("height", 100) for b in current_row + [current_box]])
-        y_tolerance = avg_height * tolerance_factor
-
-        # If Y difference is small enough, add to current row
-        if abs(current_box["center_y"] - last_box_in_row["center_y"]) <= y_tolerance:
-            current_row.append(current_box)
-        else:
-            # Start new row
-            rows.append(current_row)
-            current_row = [current_box]
-
-    # Don't forget the last row
-    if current_row:
-        rows.append(current_row)
-
-    print(f"Identified {len(rows)} rows:")
-    for i, row in enumerate(rows):
-        avg_y = np.mean([b["center_y"] for b in row])
-        print(f"  Row {i+1}: {len(row)} boxes at Y≈{avg_y:.1f}")
-
-    # Sort each row by X coordinate (left to right)
-    ranked_boxes = []
-    for row_idx, row in enumerate(rows):
-        sorted_row = sorted(row, key=lambda b: b["center_x"])
-        ranked_boxes.extend(sorted_row)
-
-        # Debug: print row details
-        x_positions = [b["center_x"] for b in sorted_row]
-        print(f"  Row {row_idx+1} X positions: {[f'{x:.1f}' for x in x_positions]}")
-
-    return ranked_boxes
-
-def adaptive_row_detection(boxes, min_boxes_per_row=2):
-    """
-    Advanced row detection using density-based clustering
-    """
-    if len(boxes) < min_boxes_per_row:
-        return boxes
-
-    # Extract Y coordinates
-    y_coords = np.array([b["center_y"] for b in boxes]).reshape(-1, 1)
-
-    # Use DBSCAN-like approach or simple gap detection
-    y_sorted = sorted([b["center_y"] for b in boxes])
-
-    # Find gaps in Y coordinates to determine row breaks
-    gaps = []
-    for i in range(1, len(y_sorted)):
-        gap = y_sorted[i] - y_sorted[i-1]
-        gaps.append(gap)
-
-    # Determine threshold for row separation (larger gaps = new rows)
-    if gaps:
-        gap_threshold = np.percentile(gaps, 60) # Use 70th percentile as threshold
-        print(f"Row separation threshold: {gap_threshold:.1f} pixels")
-    else:
-        gap_threshold = 50 # Default fallback
-
-    # Group into rows based on gaps
-    rows = []
-    current_row = []
-
-    boxes_by_y = sorted(boxes, key=lambda b: b["center_y"])
-
-    for i, box in enumerate(boxes_by_y):
-        if i == 0:
-            current_row = [box]
-        else:
-            prev_box = boxes_by_y[i-1]
-            y_gap = box["center_y"] - prev_box["center_y"]
-
-            if y_gap <= gap_threshold:
-                current_row.append(box)
-            else:
-                if current_row:
-                    rows.append(current_row)
-                current_row = [box]
-
-    # Add final row
-    if current_row:
-        rows.append(current_row)
-
-    # Sort each row by X coordinate and combine
-    ranked_boxes = []
-    for row in rows:
-        sorted_row = sorted(row, key=lambda b: b["center_x"])
-        ranked_boxes.extend(sorted_row)
-
-    return ranked_boxes
-
-# In SCRIPT 1
-
-def extract_ranked_boxes_from_image(pil_img, roboflow_model, output_folder, page_prefix="page1",
-                                    filter_small_boxes=True, ranking_method="improved_grid",
-                                    confidence_threshold=25):
-    """
-    Extract product boxes, rank them, save cropped images.
-    Returns the list of ranked box dictionaries and paths to saved cropped files.
-    Visualization is NOT created here.
-    """
-    # Save PIL image as a temp file for Roboflow
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-        temp_img_path = tmp.name
-        pil_img.save(temp_img_path, "JPEG")
-
-    # print(f"Running Roboflow detection on {page_prefix} with confidence threshold {confidence_threshold}%...")
-    rf_result = roboflow_model.predict(temp_img_path, confidence=confidence_threshold, overlap=30)
-    boxes_from_rf = rf_result.json().get("predictions", [])
-    # print(f"Roboflow detected {len(boxes_from_rf)} boxes for {page_prefix}")
-
-    sortable_boxes = []
-    filtered_count = 0
-    for pred in boxes_from_rf:
-        x, y, w, h = pred["x"], pred["y"], pred["width"], pred["height"]
-        cls = pred.get("class", "unknown")
-        if is_valid_product_box(w, h, pil_img.width, pil_img.height):
-            sortable_boxes.append({
-                "pred": pred, "center_x": x, "center_y": y,
-                "left": x - w / 2, "top": y - h / 2,
-                "right": x + w / 2, "bottom": y + h / 2,
-                "width": w, "height": h, "class": cls
-            })
-        else:
-            filtered_count += 1
-    # print(f"Kept {len(sortable_boxes)} valid product boxes for {page_prefix}, filtered out {filtered_count}")
-
-    if not sortable_boxes:
-        os.remove(temp_img_path)
-        return [], [] # Return empty lists if no valid boxes
-
-    # Apply selected ranking method
-    if ranking_method == "improved_grid":
-        sortable_boxes = improved_grid_ranking(sortable_boxes)
-    elif ranking_method == "adaptive":
-        sortable_boxes = adaptive_row_detection(sortable_boxes)
-    elif ranking_method == "kmeans":
-        sortable_boxes = rank_by_kmeans_rows(sortable_boxes)
-    else: # reading_order
-        sortable_boxes = rank_by_reading_order(sortable_boxes)
-
-    os.makedirs(output_folder, exist_ok=True) # For cropped images
-
-    saved_cropped_files = []
-    for idx, b in enumerate(sortable_boxes):
-        pred_box = b["pred"]
-        x, y, w, h = pred_box["x"], pred_box["y"], pred_box["width"], pred_box["height"]
-        padding = 10
-        left = max(0, int(x - w / 2) - padding)
-        upper = max(0, int(y - h / 2) - padding)
-        right = min(pil_img.width, int(x + w / 2) + padding)
-        lower = min(pil_img.height, int(y + h / 2) + padding)
-        
-        if right <= left or lower <= upper: # Check for invalid crop dimensions
-            # print(f"Warning: Invalid crop dimensions for box {idx+1} in {page_prefix}. Skipping crop.")
-            continue
-
-        cropped = pil_img.crop((left, upper, right, lower))
-        save_path = os.path.join(output_folder, f"{page_prefix}_rank_{idx+1}.jpg")
-        cropped.save(save_path, "JPEG", quality=95) # Explicit high quality for VLM
-        saved_cropped_files.append(save_path)
-
-    os.remove(temp_img_path)
-    return sortable_boxes, saved_cropped_files
-
-
-def create_ranking_visualization(pil_img: Image.Image, ranked_boxes: List[Dict],
-                                 comparison_details: Dict, output_path: str, catalog_id: str):
-    """
-    Creates a visualization with properly sized labels and no overlapping text.
-    """
-    img_copy = pil_img.copy()
-    draw = ImageDraw.Draw(img_copy)
-    
-    # Calculate font size based on image size - more moderate scaling
-    base_font_size = max(40, int(pil_img.height * 0.012))
-    label_font_size = max(35, int(pil_img.height * 0.010))
-    
-    # Try to load fonts with calculated sizes
-    font_loaded = False
-    try:
-        from PIL import ImageFont
-        # Try multiple font options for better compatibility
-        font_options = [
-            "arial.ttf", "Arial.ttf", "helvetica.ttf", "Helvetica.ttf",
-            "DejaVuSans.ttf", "Liberation-Sans.ttf", "FreeSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "C:/Windows/Fonts/arial.ttf", "C:/Windows/Fonts/Arial.ttf"
-        ]
-        
-        for font_name in font_options:
-            try:
-                font = ImageFont.truetype(font_name, base_font_size)
-                label_font = ImageFont.truetype(font_name, label_font_size)
-                font_loaded = True
-                logger.info(f"Successfully loaded font: {font_name}")
-                break
-            except:
-                continue
-        
-        if not font_loaded:
-            logger.warning("No TrueType fonts found - will use larger box overlays")
-            font = ImageFont.load_default()
-            label_font = font
-    except Exception as e:
-        logger.warning(f"Font loading error: {e}")
-        font = ImageFont.load_default()
-        label_font = font
-
-    # Error type colors and labels with visible but not overwhelming lines
-    error_styles = {
-        "PRICE_OFFER": {"color": "#FF0000", "label": "PRICE", "width": 8},
-        "PRICE_REGULAR": {"color": "#FF0000", "label": "PRICE", "width": 8},
-        "TEXT_TITLE": {"color": "#FF8C00", "label": "TITLE", "width": 8},
-        "TEXT_DESCRIPTION": {"color": "#FFA500", "label": "DESC", "width": 8},
-        "PHOTO": {"color": "#9370DB", "label": "PHOTO", "width": 8},
-        "MISSING_P1": {"color": "#000000", "label": "MISSING", "width": 10},
-        "MISSING_P2": {"color": "#000000", "label": "MISSING", "width": 10}
-    }
-
-    # Create lookup map
-    boxes_by_rank = {idx + 1: box for idx, box in enumerate(ranked_boxes)}
-    
-    catalog_num = catalog_id[-1]
-    product_vlm_data_map = comparison_details.get(f"catalog{catalog_num}_products", {})
-    comparison_rows_dict = comparison_details.get("comparison_rows", {})
-
-    # Helper function to get text dimensions
-    def get_text_dimensions(text, font):
-        if font_loaded:
-            try:
-                bbox = draw.textbbox((0, 0), text, font=font)
-                return bbox[2] - bbox[0], bbox[3] - bbox[1]
-            except:
-                return len(text) * 12, 20
-        else:
-            return len(text) * 12, 20
-
-    # Process each comparison row
-    for row_data in comparison_rows_dict.values():
-        issues = row_data.get("issues", [])
-        if not issues:
-            continue
-
-        rank_in_this_catalog = row_data.get(f"rank_c{catalog_num}")
-        if not rank_in_this_catalog:
-            continue
-
-        main_box_data = boxes_by_rank.get(rank_in_this_catalog)
-        product_vlm_data = product_vlm_data_map.get(rank_in_this_catalog)
-
-        if not main_box_data or not product_vlm_data:
-            continue
-
-        main_box_left = int(main_box_data.get("left", 0))
-        main_box_top = int(main_box_data.get("top", 0))
-        main_box_right = int(main_box_data.get("right", 0))
-        main_box_bottom = int(main_box_data.get("bottom", 0))
-
-        # Handle missing products
-        is_missing_issue = f"MISSING_P{catalog_num}" in issues
-        if is_missing_issue:
-            draw.rectangle(
-                [main_box_left, main_box_top, main_box_right, main_box_bottom],
-                outline=error_styles["MISSING_P1"]["color"], 
-                width=error_styles["MISSING_P1"]["width"]
-            )
-            
-            # Properly sized label for missing
-            label_text = "MISSING"
-            text_width, text_height = get_text_dimensions(label_text, label_font)
-            
-            # Add padding to text dimensions
-            label_width = text_width + 20
-            label_height = text_height + 16
-
-            label_x = main_box_left + (main_box_right - main_box_left - label_width) // 2
-            label_y = main_box_top + (main_box_bottom - main_box_top - label_height) // 2
-
-            # Draw background
-            draw.rectangle(
-                [label_x - 5, label_y - 5, label_x + label_width + 5, label_y + label_height + 5],
-                fill="white", outline="black", width=4
-            )
-
-            # Draw inner rectangle
-            draw.rectangle(
-                [label_x, label_y, label_x + label_width, label_y + label_height],
-                fill="yellow", outline="black", width=3
-            )
-
-            # Draw text in center
-            text_x = label_x + (label_width - text_width) // 2
-            text_y = label_y + (label_height - text_height) // 2
-
-            draw.text((text_x, text_y), label_text, fill="black", font=label_font)
-            continue
-
-        # Collect all labels for this product to avoid overlap
-        product_labels = []
-        
-        # Draw specific highlights
-        for issue_type in issues:
-            style = error_styles.get(issue_type, {"color": "gray", "label": "Issue", "width": 8})
-            
-            # Map issue type to field
-            field_mapping = {
-                "PRICE_OFFER": "offer_price",
-                "PRICE_REGULAR": "regular_price",
-                "TEXT_TITLE": "title",
-                "TEXT_DESCRIPTION": "description",
-                "PHOTO": "photo_area"
-            }
-            
-            field_key = field_mapping.get(issue_type)
-            if not field_key:
-                continue
-
-            field_data = product_vlm_data.get(field_key)
-            if isinstance(field_data, dict) and 'bbox' in field_data:
-                sub_bbox = field_data['bbox']
-                if sub_bbox and len(sub_bbox) == 4:
-                    # Convert relative coordinates to absolute
-                    abs_x1 = main_box_left + sub_bbox[0]
-                    abs_y1 = main_box_top + sub_bbox[1]
-                    abs_x2 = main_box_left + sub_bbox[2]
-                    abs_y2 = main_box_top + sub_bbox[3]
-                    
-                    # Draw highlight box
-                    draw.rectangle(
-                        [abs_x1, abs_y1, abs_x2, abs_y2], 
-                        outline=style["color"], 
-                        width=style["width"]
-                    )
-                    
-                    # Calculate label dimensions based on actual text size
-                    label_text = style["label"]
-                    text_width, text_height = get_text_dimensions(label_text, label_font)
-                    
-                    # Add padding to create proper rectangle size
-                    label_width = text_width + 16
-                    label_height = text_height + 12
-
-                    # Store label info for positioning
-                    product_labels.append({
-                        'text': label_text,
-                        'color': style["color"],
-                        'width': label_width,
-                        'height': label_height,
-                        'bbox': (abs_x1, abs_y1, abs_x2, abs_y2),
-                        'text_width': text_width,
-                        'text_height': text_height
-                    })
-
-        # Position labels inside the main product box (top-right corner) to avoid confusion
-        label_y_offset = 0
-        for label_info in product_labels:
-            abs_x1, abs_y1, abs_x2, abs_y2 = label_info['bbox']
-            
-            # Position label in the top-right corner of the MAIN product box, not the sub-element
-            # This ensures labels are clearly associated with the correct product
-            label_x = main_box_left + 10   
-            label_y = main_box_top + 10 + label_y_offset    
-            
-            # Ensure label stays within the main product box bounds
-            if label_x < main_box_left + 5:
-                label_x = main_box_left + 5
-            if label_y + label_info['height'] > main_box_bottom - 5:
-                label_y = main_box_bottom - label_info['height'] - 5
-
-            # Draw white background with colored border
-            draw.rectangle(
-                [label_x, label_y, label_x + label_info['width'], label_y + label_info['height']],
-                fill="white", outline=label_info['color'], width=4
-            )
-
-            # Calculate text position to center it in the rectangle
-            text_x = label_x + (label_info['width'] - label_info['text_width']) // 2
-            text_y = label_y + (label_info['height'] - label_info['text_height']) // 2
-
-            # Draw the text
-            draw.text((text_x, text_y), label_info['text'], fill=label_info['color'], font=label_font)
-            
-            # Increase offset for next label to prevent overlap
-            label_y_offset += label_info['height'] + 5
-
-    # Legend is completely removed as requested
-
-    img_copy.save(output_path, "JPEG", quality=95)
-    logger.info(f"Generated visualization with properly sized labels at: {output_path}")
-
-def process_dual_pdfs_for_comparison(pdf_path1, pdf_path2, output_root="catalog_comparison",
-                                     ranking_method="improved_grid", filter_small_boxes=True,
-                                     confidence_threshold=25): # Removed generate_initial_visualizations
-    print("="*60)
-    print("DUAL PDF PROCESSING - STEP 1 (Box Detection & Cropping)")
-    print(f"Detection Confidence Threshold: {confidence_threshold}%")
-    print("="*60)
-
-    poppler_path_to_use = get_poppler_path()
-    # ... (logging for poppler path) ...
-
-    output_path = Path(output_root)
-    catalog1_base_path = output_path / "catalog1"
-    catalog2_base_path = output_path / "catalog2"
-    catalog1_base_path.mkdir(parents=True, exist_ok=True)
-    catalog2_base_path.mkdir(parents=True, exist_ok=True)
-
-    results = {
-        "catalog1_path": str(catalog1_base_path), # Base path for catalog 1 outputs (page folders)
-        "catalog2_path": str(catalog2_base_path), # Base path for catalog 2 outputs
-        "catalog1_files": [], # List of paths to cropped product images from catalog 1
-        "catalog2_files": [], # List of paths to cropped product images from catalog 2
-        "catalog1_pages": 0,
-        "catalog2_pages": 0,
-        "total_products_catalog1": 0,
-        "total_products_catalog2": 0,
-        "confidence_threshold": confidence_threshold,
-        "page_level_data_catalog1": {}, # Stores {page_num: {'image_pil': PILObject, 'ranked_boxes': list, 'page_folder_path': str}}
-        "page_level_data_catalog2": {},
-    }
-
-    # Process PDF 1
-    print(f"\nPROCESSING PDF 1 (Box Detection): {Path(pdf_path1).name}")
-    print("-" * 50)
-    try:
-        # For PDF 1
-        logger.info(f"Converting PDF 1 ({Path(pdf_path1).name}) to images with DPI 300...")
-        pages1_pil_list = convert_from_path(pdf_path1, dpi=300, poppler_path=poppler_path_to_use) # Changed DPI
-        results["catalog1_pages"] = len(pages1_pil_list)
-        logger.info(f"Converted PDF 1 to {len(pages1_pil_list)} pages")
-
-        for page_idx, pil_page_image in enumerate(pages1_pil_list):
-            page_num = page_idx + 1
-            page_folder_for_crops = catalog1_base_path / f"page_{page_num}"
-            page_folder_for_crops.mkdir(exist_ok=True)
-
-            # print(f"\nCatalog 1 - Page {page_num} (Box Detection & Cropping)...")
-            # Note: Roboflow model is passed via GLOBAL_ROBOFLOW_MODEL through main_dual_pdf_processing
-            ranked_boxes_on_page, saved_cropped_on_page = extract_ranked_boxes_from_image(
-                pil_page_image,
-                roboflow_model=None, # Will be picked up by patched function
-                output_folder=str(page_folder_for_crops), # For saving cropped images
-                page_prefix=f"c1_p{page_num}",
-                filter_small_boxes=filter_small_boxes,
-                ranking_method=ranking_method,
-                confidence_threshold=confidence_threshold
-            )
-            results["catalog1_files"].extend(saved_cropped_on_page)
-            results["total_products_catalog1"] += len(saved_cropped_on_page)
-            results["page_level_data_catalog1"][page_num] = {
-                'image_pil': pil_page_image, # Store the original PIL image of the page
-                'ranked_boxes': ranked_boxes_on_page, # Store the detected & ranked boxes
-                'page_folder_path': str(page_folder_for_crops) # Path where cropped images for this page are
-            }
-            # print(f"Page {page_num}: {len(saved_cropped_on_page)} product images cropped and data stored.")
-
-    except Exception as e:
-        logger.error(f"Error processing PDF 1: {e}", exc_info=True)
-        results["catalog1_error"] = str(e)
-
-    # Process PDF 2 (similar logic)
-    print(f"\nPROCESSING PDF 2 (Box Detection): {Path(pdf_path2).name}")
-    print("-" * 50)
-    try:
-        # For PDF 2
-        logger.info(f"Converting PDF 2 ({Path(pdf_path2).name}) to images with DPI 300...")
-        pages2_pil_list = convert_from_path(pdf_path2, dpi=300, poppler_path=poppler_path_to_use) # Changed DPI
-        results["catalog2_pages"] = len(pages2_pil_list)
-        logger.info(f"Converted PDF 2 to {len(pages2_pil_list)} pages")
-
-        for page_idx, pil_page_image in enumerate(pages2_pil_list):
-            page_num = page_idx + 1
-            page_folder_for_crops = catalog2_base_path / f"page_{page_num}"
-            page_folder_for_crops.mkdir(exist_ok=True)
-
-            # print(f"\nCatalog 2 - Page {page_num} (Box Detection & Cropping)...")
-            ranked_boxes_on_page, saved_cropped_on_page = extract_ranked_boxes_from_image(
-                pil_page_image,
-                roboflow_model=None, # Will be picked by patched function
-                output_folder=str(page_folder_for_crops),
-                page_prefix=f"c2_p{page_num}",
-                filter_small_boxes=filter_small_boxes,
-                ranking_method=ranking_method,
-                confidence_threshold=confidence_threshold
-            )
-            results["catalog2_files"].extend(saved_cropped_on_page)
-            results["total_products_catalog2"] += len(saved_cropped_on_page)
-            results["page_level_data_catalog2"][page_num] = {
-                'image_pil': pil_page_image,
-                'ranked_boxes': ranked_boxes_on_page,
-                'page_folder_path': str(page_folder_for_crops)
-            }
-            # print(f"Page {page_num}: {len(saved_cropped_on_page)} product images cropped and data stored.")
-    except Exception as e:
-        logger.error(f"Error processing PDF 2: {e}", exc_info=True)
-        results["catalog2_error"] = str(e)
-
-    
-
-    # Print summary
-    print("\n" + "="*60)
-    print("PROCESSING SUMMARY")
-    print("="*60)
-    print(f"Catalog 1 ({Path(pdf_path1).name}):")
-    print(f"Pages: {results['catalog1_pages']}")
-    print(f"Total Products: {results['total_products_catalog1']}")
-    print(f"Output: {results['catalog1_path']}")
-
-    print(f"\nCatalog 2 ({Path(pdf_path2).name}):")
-    print(f"Pages: {results['catalog2_pages']}")
-    print(f"Total Products: {results['total_products_catalog2']}")
-    print(f"Output: {results['catalog2_path']}")
-
-    print(f"\nRanking Method Used: {ranking_method}")
-    print(f"Small Box Filtering: {'Enabled' if filter_small_boxes else 'Disabled'}")
-    print(f"Detection Confidence: {confidence_threshold}%") # Show threshold
-    print(f"Poppler Path Used: {poppler_path_to_use if poppler_path_to_use else 'System PATH'}")
-
-    return results
-
-# Legacy functions for backward compatibility
-def rank_by_kmeans_rows(boxes):
-    """Use K-means clustering to identify rows, then sort within rows"""
-    if len(boxes) < 2:
-        return boxes
-
-    y_coords = np.array([b["center_y"] for b in boxes]).reshape(-1, 1)
-    n_boxes = len(boxes)
-    estimated_cols = int(math.sqrt(n_boxes))
-    estimated_rows = math.ceil(n_boxes / estimated_cols)
-    n_clusters = min(estimated_rows, n_boxes)
-
-    try:
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        row_labels = kmeans.fit_predict(y_coords)
-
-        rows = {}
-        for i, box in enumerate(boxes):
-            row_id = row_labels[i]
-            if row_id not in rows:
-                rows[row_id] = []
-            rows[row_id].append(box)
-
-        sorted_row_ids = sorted(rows.keys(),
-                                key=lambda rid: np.mean([b["center_y"] for b in rows[rid]]))
-
-        ranked_boxes = []
-        for row_id in sorted_row_ids:
-            row_boxes = sorted(rows[row_id], key=lambda b: b["center_x"])
-            ranked_boxes.extend(row_boxes)
-
-        return ranked_boxes
-
-    except Exception as e:
-        print(f"K-means clustering failed: {e}")
-        return rank_by_reading_order(boxes)
-
-def rank_by_reading_order(boxes):
-    """Rank boxes in reading order using distance-based approach"""
-    if not boxes:
-        return boxes
-
-    remaining_boxes = boxes.copy()
-    ranked_boxes = []
-
-    start_box = min(remaining_boxes, key=lambda b: b["center_y"] + b["center_x"] * 0.1)
-    ranked_boxes.append(start_box)
-    remaining_boxes.remove(start_box)
-
-    while remaining_boxes:
-        current_box = ranked_boxes[-1]
-        best_box = None
-        best_score = float('inf')
-
-        for box in remaining_boxes:
-            dx = box["center_x"] - current_box["center_x"]
-            dy = box["center_y"] - current_box["center_y"]
-
-            if abs(dy) < 50: # Same row threshold
-                score = abs(dy) + max(0, -dx) * 2
-            else:
-                score = dy + abs(box["center_x"] - min(b["center_x"] for b in boxes)) * 0.1
-
-            if score < best_score:
-                best_score = score
-                best_box = box
-
-        if best_box:
-            ranked_boxes.append(best_box)
-            remaining_boxes.remove(best_box)
-
-    return ranked_boxes
-
-# Main function for easy usage
-# In SCRIPT 1
-def main_dual_pdf_processing(pdf_path1, pdf_path2, roboflow_model,
-                             output_root="catalog_comparison", ranking_method="improved_grid",
-                             confidence_threshold=25): # Removed generate_initial_visualizations
-    global GLOBAL_ROBOFLOW_MODEL
-    GLOBAL_ROBOFLOW_MODEL = roboflow_model
-
-    original_extract = globals().get('extract_ranked_boxes_from_image')
-    # It's good practice to ensure original_extract is not None before proceeding
-    if original_extract is None:
-        # This should not happen if the script is intact
-        raise RuntimeError("extract_ranked_boxes_from_image function not found in globals.")
-
-
-    def patched_extract(*args, **kwargs):
-        if kwargs.get('roboflow_model') is None:
-            kwargs['roboflow_model'] = GLOBAL_ROBOFLOW_MODEL
-        # Ensure original_extract is callable
-        if callable(original_extract):
-            return original_extract(*args, **kwargs)
-        else:
-            # Handle error: original_extract is not what we expect
-            raise TypeError("The original extract_ranked_boxes_from_image is not callable.")
-
-
-    globals()['extract_ranked_boxes_from_image'] = patched_extract
-
-    try:
-        results = process_dual_pdfs_for_comparison(
-            pdf_path1, pdf_path2, output_root, ranking_method,
-            confidence_threshold=confidence_threshold
-            # generate_initial_visualizations is removed
-        )
-        return results
-    finally:
-        globals()['extract_ranked_boxes_from_image'] = original_extract
-        if 'GLOBAL_ROBOFLOW_MODEL' in globals():
-            del globals()['GLOBAL_ROBOFLOW_MODEL']
-
-# ========================================
-# SCRIPT 2: Image Template Matching
-# ========================================
-
-def load_image(image_path: str) -> Optional[np.ndarray]:
-    """
-    Load an image using OpenCV.
-
-    Args:
-        image_path: Path to the image file
-
-    Returns:
-        Image as numpy array or None if failed to load
-    """
-    try:
-        image = cv2.imread(image_path)
-        if image is not None:
-            # Convert BGR to RGB for consistency
-            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        return image
-    except Exception as e:
-        print(f"Error loading image {image_path}: {e}")
+def parse_price_string(price_str_input, item_id_for_log="N/A"):
+    if price_str_input is None or price_str_input == "":
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Input is None or empty, returning None.")
         return None
+    
+    if isinstance(price_str_input, (int, float)):
+        if price_str_input < 0:
+            logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Input is numeric but negative ({price_str_input}), returning None.")
+            return None
+        if isinstance(price_str_input, int) and 100 <= price_str_input <= 99999: 
+            s_price = str(price_str_input)
+            if len(s_price) == 3: 
+                val = float(f"{s_price[0]}.{s_price[1:]}")
+                logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Input int {price_str_input} (len 3) parsed to {val}.")
+                return val
+            if len(s_price) == 4: 
+                val = float(f"{s_price[:2]}.{s_price[2:]}")
+                logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Input int {price_str_input} (len 4) parsed to {val}.")
+                return val
+            if len(s_price) == 5: 
+                val = float(f"{s_price[:3]}.{s_price[3:]}")
+                logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Input int {price_str_input} (len 5) parsed to {val}.")
+                return val
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Input is numeric ({price_str_input}), returning as float.")
+        return float(price_str_input)
 
-def resize_image_for_comparison(image: np.ndarray, max_size: int = 500) -> np.ndarray:
+    price_str = str(price_str_input).strip()
+    logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Original string: '{price_str_input}', Stripped: '{price_str}'")
+
+    geom_price_match = re.match(r'^\[GEOM_PRICE:\s*(\d{1,2})\s+(\d{2})\s*\]$', price_str)
+    if geom_price_match:
+        whole = geom_price_match.group(1)
+        decimal_part = geom_price_match.group(2)
+        val = float(f"{whole}.{decimal_part}")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched GEOM_PRICE pattern '{price_str}' -> {val}.")
+        return val
+
+    space_separated_match = re.match(r'^(\d{1,2})\s+(\d{2})(?:\s*c/u)?$', price_str)
+    if space_separated_match:
+        whole = space_separated_match.group(1)
+        decimal_part = space_separated_match.group(2)
+        val = float(f"{whole}.{decimal_part}")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched space-separated pattern '{price_str}' -> {val}.")
+        return val
+
+    if re.fullmatch(r'[1-9]\d{2}', price_str): 
+        val = float(f"{price_str[0]}.{price_str[1:]}")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched 3-digit pattern '{price_str}' -> {val}.")
+        return val
+    
+    if re.fullmatch(r'[1-9]\d{3}', price_str): 
+        val = float(f"{price_str[:2]}.{price_str[2:]}")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched 4-digit pattern '{price_str}' -> {val}.")
+        return val
+    
+    if re.fullmatch(r'[1-9]\d{4}', price_str): 
+        val = float(f"{price_str[:3]}.{price_str[3:]}")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched 5-digit pattern '{price_str}' -> {val}.")
+        return val
+
+    cleaned_price_str = price_str.lower()
+    cleaned_price_str = re.sub(r'[$\¢₡€£¥]|regular|reg\.|oferta|esp\.|special|precio|price', '', cleaned_price_str, flags=re.IGNORECASE)
+    cleaned_price_str = re.sub(r'\b(cada uno|c/u|cu|each|por)\b', '', cleaned_price_str, flags=re.IGNORECASE)
+    cleaned_price_str = cleaned_price_str.strip()
+    logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Cleaned for keywords: '{cleaned_price_str}'")
+    
+    if cleaned_price_str != price_str: 
+        if re.fullmatch(r'[1-9]\d{2}', cleaned_price_str):
+            val = float(f"{cleaned_price_str[0]}.{cleaned_price_str[1:]}")
+            logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched 3-digit pattern on cleaned string '{cleaned_price_str}' -> {val}.")
+            return val
+        if re.fullmatch(r'[1-9]\d{3}', cleaned_price_str):
+            val = float(f"{cleaned_price_str[:2]}.{cleaned_price_str[2:]}")
+            logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched 4-digit pattern on cleaned string '{cleaned_price_str}' -> {val}.")
+            return val
+        if re.fullmatch(r'[1-9]\d{4}', cleaned_price_str):
+            val = float(f"{cleaned_price_str[:3]}.{cleaned_price_str[3:]}")
+            logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched 5-digit pattern on cleaned string '{cleaned_price_str}' -> {val}.")
+            return val
+
+    std_decimal_match_dot = re.fullmatch(r'(\d+)\.(\d{1,2})', cleaned_price_str)
+    if std_decimal_match_dot:
+        num_part, dec_part = std_decimal_match_dot.groups()
+        if len(dec_part) == 1: dec_part += "0" 
+        val = float(f"{num_part}.{dec_part}")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched dot-decimal pattern '{cleaned_price_str}' -> {val}.")
+        return val if val >= 0 else None
+
+    std_decimal_match_comma = re.fullmatch(r'(\d+),(\d{1,2})', cleaned_price_str)
+    if std_decimal_match_comma:
+        num_part, dec_part = std_decimal_match_comma.groups()
+        if len(dec_part) == 1: dec_part += "0"
+        val = float(f"{num_part}.{dec_part}") 
+        logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched comma-decimal pattern '{cleaned_price_str}' -> {val}.")
+        return val if val >= 0 else None
+        
+    whole_match = re.fullmatch(r'(\d+)', cleaned_price_str)
+    if whole_match:
+        num = float(whole_match.group(1))
+        if num == 0.0: 
+            logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched whole number 0.0.")
+            return 0.0
+        if num >= 1 and num < 100: 
+            logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Matched whole number pattern '{cleaned_price_str}' -> {num}.")
+            return num
+
+    logger.debug(f"ITEM_ID: {item_id_for_log} - parse_price_string - Could not parse price string: '{price_str}' (cleaned: '{cleaned_price_str}'). Returning None.")
+    return None
+
+def detect_price_candidates(line_blocks, image_height_px, blocks_map, item_id_for_log="N/A", prepended_geom_price=None):
+    candidates = []
+    price_pattern_text = r"""
+        (?<![\w\d.])(?:             
+            \$?\s?\d{1,3}(?:[,.]\d{3})*(?:[,.]\d{2}) |   
+            \b\d{1,2}\s+\d{2}\b |                      
+            \b[1-9]\d{2,4}\b |                         
+            \b\d+x\d{2,3}\b |                         
+            \[GEOM_PRICE:\s*\d{1,2}\s+\d{2}\s*\]       
+        )(?![\d.])                                   
     """
-    Resize image for faster comparison while maintaining aspect ratio.
+    price_regex = re.compile(price_pattern_text, re.VERBOSE)
+    
+    size_unit_keywords = ['oz', 'onzas', 'lb', 'libras', 'gal', 'lt', 'ml', 'g', 'kg', 
+                          'rollos', 'hojas', 'ct', 'pies', 'ft', 'metros', 'unidad', 
+                          'unidades', 'gramo', 'litro', 'sheet', 'sheets', 'count', 'pk']
+    
+    logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Processing {len(line_blocks)} line_blocks. Prepended geom price: {prepended_geom_price}")
 
-    Args:
-        image: Input image as numpy array
-        max_size: Maximum dimension size
+    if prepended_geom_price:
+        parsed_geom_val = parse_price_string(prepended_geom_price, item_id_for_log=f"{item_id_for_log}-geom_cand_prep")
+        if parsed_geom_val is not None:
+            geom_candidate = {
+                'text_content': prepended_geom_price, 
+                'parsed_value': parsed_geom_val,
+                'bounding_box': line_blocks[0]['Geometry']['BoundingBox'] if line_blocks else None, 
+                'pixel_height': image_height_px * 0.1, # Placeholder height for geom price
+                'source_block_id': 'GEOMETRIC_MERGE', 
+                'full_line_text': prepended_geom_price,
+                'is_regular_candidate': False, 
+                'has_price_indicator': True 
+            }
+            candidates.append(geom_candidate)
+            logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Added prepended geometric candidate: {geom_candidate}")
 
-    Returns:
-        Resized image
-    """
-    height, width = image.shape[:2]
-
-    if max(height, width) > max_size:
-        if height > width:
-            new_height = max_size
-            new_width = int(width * (max_size / height))
-        else:
-            new_width = max_size
-            new_height = int(height * (max_size / width))
-
-        image = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_AREA)
-
-    return image
-
-def calculate_image_similarity(img1: np.ndarray, img2: np.ndarray, method: str = "structural") -> float:
-    """
-    Calculate similarity between two images using different methods.
-
-    Args:
-        img1: First image
-        img2: Second image
-        method: Comparison method ("structural", "histogram", "template")
-
-    Returns:
-        Similarity score (0.0 to 1.0, where 1.0 is identical)
-    """
-    # Resize images to same size for comparison
-    img1_resized = resize_image_for_comparison(img1)
-    img2_resized = resize_image_for_comparison(img2)
-
-    # Resize both to the same dimensions
-    target_size = (300, 300)
-    img1_resized = cv2.resize(img1_resized, target_size)
-    img2_resized = cv2.resize(img2_resized, target_size)
-
-    if method == "structural":
-        # Convert to grayscale for SSIM
-        gray1 = cv2.cvtColor(img1_resized, cv2.COLOR_RGB2GRAY)
-        gray2 = cv2.cvtColor(img2_resized, cv2.COLOR_RGB2GRAY)
-
-        # Calculate Structural Similarity Index
-        from skimage.metrics import structural_similarity
-        similarity = structural_similarity(gray1, gray2)
-        return max(0.0, similarity) # Ensure non-negative
-
-    elif method == "histogram":
-        # Calculate histogram similarity
-        hist1 = cv2.calcHist([img1_resized], [0, 1, 2], None, [50, 50, 50], [0, 256, 0, 256, 0, 256])
-        hist2 = cv2.calcHist([img2_resized], [0, 1, 2], None, [50, 50, 50], [0, 256, 0, 256, 0, 256])
-
-        # Normalize histograms
-        cv2.normalize(hist1, hist1)
-        cv2.normalize(hist2, hist2)
-
-        # Compare histograms using correlation
-        similarity = cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
-        return max(0.0, similarity)
-
-    elif method == "template":
-        # Template matching
-        gray1 = cv2.cvtColor(img1_resized, cv2.COLOR_RGB2GRAY)
-        gray2 = cv2.cvtColor(img2_resized, cv2.COLOR_RGB2GRAY)
-
-        # Use the smaller image as template
-        if gray1.size < gray2.size:
-            template, image = gray1, gray2
-        else:
-            template, image = gray2, gray1
-
-        # Perform template matching
-        result = cv2.matchTemplate(image, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, _ = cv2.minMaxLoc(result)
-
-        return max(0.0, max_val)
-
-    # Fallback: Mean Squared Error based similarity
-    mse = np.mean((img1_resized.astype(float) - img2_resized.astype(float)) ** 2)
-    similarity = 1.0 / (1.0 + mse / 1000.0) # Normalize MSE
-    return similarity
-
-def find_matching_images_by_template(template_paths: List[str], folder_path: str,
-                                     similarity_threshold: float = 0.8,
-                                     comparison_method: str = "structural") -> List[str]:
-    """
-    Find images in folder that match the template images using image comparison.
-
-    Args:
-        template_paths: List of paths to template images
-        folder_path: Path to folder containing images to search
-        similarity_threshold: Minimum similarity score to consider a match (0.0 to 1.0)
-        comparison_method: Method to use for comparison ("structural", "histogram", "template")
-
-    Returns:
-        List of matching image filenames
-    """
-    if not os.path.exists(folder_path):
-        print(f"Folder {folder_path} not found!")
-        return []
-
-    # Load template images
-    template_images = []
-    for template_path in template_paths:
-        if os.path.exists(template_path):
-            template_img = load_image(template_path)
-            if template_img is not None:
-                template_images.append((template_path, template_img))
-                print(f"Loaded template: {os.path.basename(template_path)}")
-            else:
-                print(f"Failed to load template: {template_path}")
-        else:
-            print(f"Template not found: {template_path}")
-
-    if not template_images:
-        print("No valid template images loaded!")
-        return []
-
-    # Get all image files in folder
-    image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
-    folder_images = []
-
-    for file in os.listdir(folder_path):
-        if any(file.lower().endswith(ext) for ext in image_extensions):
-            folder_images.append(file)
-
-    print(f"Found {len(folder_images)} images in folder to compare")
-
-    # Find matching images
-    matching_images = []
-
-    for folder_image in folder_images:
-        folder_image_path = os.path.join(folder_path, folder_image)
-        folder_img = load_image(folder_image_path)
-
-        if folder_img is None:
+    for line_idx, line_block in enumerate(line_blocks):
+        if line_block['BlockType'] != 'LINE':
             continue
+        
+        line_text_parts = []
+        if 'Relationships' in line_block:
+            for relationship in line_block['Relationships']:
+                if relationship['Type'] == 'CHILD':
+                    for child_id in relationship['Ids']:
+                        word = blocks_map.get(child_id)
+                        if word and word['BlockType'] == 'WORD':
+                            line_text_parts.append(word['Text'])
+        
+        full_line_text = " ".join(line_text_parts).strip()
+        if not full_line_text: # Fallback if no child words but line has text
+            full_line_text = line_block.get('Text', '').strip() 
+        
+        if not full_line_text:
+            logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Line {line_idx} is empty.")
+            continue
+        
+        logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Line {line_idx} Text: '{full_line_text}'")
 
-        # Compare with each template
-        for template_path, template_img in template_images:
-            try:
-                similarity = calculate_image_similarity(template_img, folder_img, comparison_method)
+        has_price_indicator = any(indicator in full_line_text.lower() 
+                                  for indicator in ['c/u', 'cada uno', '$', 'regular', 'precio', 'esp.'])
+        
+        for match in price_regex.finditer(full_line_text):
+            raw_price_text = match.group(0).strip()
+            logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Line {line_idx} - Raw regex match: '{raw_price_text}'")
 
-                print(f"Comparing {os.path.basename(template_path)} vs {folder_image}: {similarity:.3f}")
+            if raw_price_text.startswith("[GEOM_PRICE:"): 
+                if not prepended_geom_price or raw_price_text != prepended_geom_price:
+                    # This means a GEOM_PRICE was found by regex but wasn't the one prepended (unlikely if logic is correct)
+                    # Or it's a new one if nothing was prepended (also unlikely here, as it's handled above)
+                    pass 
+                else: 
+                    continue # Already handled as the prepended one
 
-                if similarity >= similarity_threshold:
-                    matching_images.append(folder_image)
-                    print(f"  ✓ MATCH FOUND! Similarity: {similarity:.3f}")
-                    break # Don't check other templates for this image
-
-            except Exception as e:
-                print(f"Error comparing {template_path} with {folder_image}: {e}")
-
-    return matching_images
-
-def extract_number_from_filename(filename: str) -> Optional[int]:
-    """Extract number from filename for sorting purposes."""
-    numbers = re.findall(r'\d+', filename)
-    return int(numbers[-1]) if numbers else None
-
-def get_base_name_pattern(filename: str) -> str:
-    """Extract base name pattern without the number."""
-    name_without_ext = os.path.splitext(filename)[0]
-    numbers = re.findall(r'\d+', name_without_ext)
-    if numbers:
-        last_number = numbers[-1]
-        last_num_pos = name_without_ext.rfind(last_number)
-        return name_without_ext[:last_num_pos]
-    return name_without_ext
-
-def rename_images_sequentially(folder_path: str, remaining_images: List[str]):
-    """
-    Rename all remaining images sequentially starting from 1.
-    Uses temporary files to avoid conflicts and prevent creating duplicates.
-
-    Args:
-        folder_path: Path to the folder containing images
-        remaining_images: List of remaining image filenames after deletion
-    """
-    if not remaining_images:
-        print(f"No remaining images to rename in {os.path.basename(folder_path)}")
-        return
-
-    # Sort remaining images by their current numbers
-    images_with_numbers = []
-    for img in remaining_images:
-        num = extract_number_from_filename(img)
-        if num is not None:
-            images_with_numbers.append((img, num))
-
-    # Sort by current number
-    images_with_numbers.sort(key=lambda x: x[1])
-
-    print(f"\nRenaming {len(images_with_numbers)} images sequentially...")
-
-    # Create rename operations for sequential numbering (1, 2, 3, ...)
-    rename_operations = []
-
-    for new_index, (img, old_number) in enumerate(images_with_numbers, 1):
-        if old_number != new_index: # Only rename if number needs to change
-            base_pattern = get_base_name_pattern(img)
-            extension = os.path.splitext(img)[1]
-
-            # Determine number format (preserve padding style)
-            # Check if original files used zero-padding
-            has_zero_padding = any(
-                re.search(r'0\d+', os.path.splitext(original_img)[0])
-                for original_img, _ in images_with_numbers
-            )
-
-            if has_zero_padding:
-                # Use zero-padding to match original style
-                max_digits = len(str(len(images_with_numbers)))
-                new_num_str = f"{new_index:0{max_digits}d}"
-            else:
-                new_num_str = str(new_index)
-
-            new_filename = f"{base_pattern}{new_num_str}{extension}"
-
-            old_path = os.path.join(folder_path, img)
-            new_path = os.path.join(folder_path, new_filename)
-
-            rename_operations.append((old_path, new_path, img, new_filename))
-
-    # Execute rename operations using temporary files to prevent conflicts
-    successful_renames = 0
-    temp_files = [] # Track temporary files for cleanup
-
-    try:
-        # Step 1: Move files to temporary names first to avoid conflicts
-        for old_path, new_path, old_name, new_name in rename_operations:
-            try:
-                # Create a unique temporary filename
-                temp_dir = os.path.dirname(old_path)
-                temp_fd, temp_path = tempfile.mkstemp(dir=temp_dir, suffix=os.path.splitext(old_path)[1])
-                os.close(temp_fd) # Close the file descriptor
-                os.unlink(temp_path) # Remove the empty temp file
-
-                # Move original file to temp location
-                os.rename(old_path, temp_path)
-                temp_files.append((temp_path, new_path, old_name, new_name))
-                print(f"Staged for rename: {old_name} -> {new_name}")
-
-            except Exception as e:
-                print(f"Error staging {old_name}: {e}")
-
-        # Step 2: Move from temporary names to final names
-        for temp_path, new_path, old_name, new_name in temp_files:
-            try:
-                # Double-check the target doesn't exist
-                if os.path.exists(new_path):
-                    print(f"Warning: Target file {new_name} already exists, skipping rename of {old_name}")
-                    # Move back to original name to avoid losing the file
-                    original_path = os.path.join(folder_path, old_name)
-                    if not os.path.exists(original_path):
-                        os.rename(temp_path, original_path)
+            match_start, match_end = match.span()
+            context_before = full_line_text[max(0, match_start-10):match_start].lower()
+            context_after = full_line_text[match_end:min(len(full_line_text), match_end+15)].lower() 
+            
+            is_likely_size_metric = False
+            if any(re.search(r'^\s*' + re.escape(unit), context_after) for unit in size_unit_keywords):
+                if not has_price_indicator: 
+                    is_likely_size_metric = True
+                    logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Skipping '{raw_price_text}' - looks like size (unit follows, no price indicator). Context after: '{context_after[:10]}'")
+                    continue
+            if any(kw in context_before for kw in ["pack of", "paquete de", "paq de"]):
+                if not has_price_indicator:
+                    is_likely_size_metric = True
+                    logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Skipping '{raw_price_text}' - looks like size (pack of precedes, no price indicator). Context before: '{context_before[-10:]}'")
                     continue
 
-                os.rename(temp_path, new_path)
-                print(f"Renamed: {old_name} -> {new_name}")
-                successful_renames += 1
+            if re.fullmatch(r'\d{3,}', raw_price_text) and int(raw_price_text) > 100: 
+                if (re.search(r'\s*(a|-|to)\s*\d+', context_after) or 
+                    re.search(r'\d+\s*(a|-|to)\s*$', context_before)):  
+                    if not has_price_indicator:
+                        logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Skipping '{raw_price_text}' - part of size range, no price indicator.")
+                        continue
+            
+            parsed_value = parse_price_string(raw_price_text, item_id_for_log=f"{item_id_for_log}-cand-{len(candidates)}")
+            if parsed_value is not None:
+                geometry = line_block['Geometry']['BoundingBox']
+                is_regular = any(re.search(r'\b' + kw + r'\b', full_line_text, re.IGNORECASE) 
+                                 for kw in ['regular', 'reg.', 'precio regular'])
+                
+                candidate_data = {
+                    'text_content': raw_price_text, 
+                    'parsed_value': parsed_value,
+                    'bounding_box': geometry, 
+                    'pixel_height': geometry['Height'] * image_height_px,
+                    'source_block_id': line_block['Id'], 
+                    'full_line_text': full_line_text,
+                    'is_regular_candidate': is_regular,
+                    'has_price_indicator': has_price_indicator
+                }
+                candidates.append(candidate_data)
+                logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Added candidate: {candidate_data}")
+            else:
+                logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Line {line_idx} - Match '{raw_price_text}' did not parse to a valid price.")
 
-            except Exception as e:
-                print(f"Error finalizing rename of {old_name}: {e}")
-                # Try to restore original file
-                try:
-                    original_path = os.path.join(folder_path, old_name)
-                    if not os.path.exists(original_path):
-                        os.rename(temp_path, original_path)
-                        print(f"Restored original file: {old_name}")
-                except Exception as restore_error:
-                    print(f"Error restoring {old_name}: {restore_error}")
+    candidates.sort(key=lambda c: (
+        c['source_block_id'] != 'GEOMETRIC_MERGE', # GEOMETRIC_MERGE comes first (False sorts before True)
+        -c['pixel_height'], 
+        not c['has_price_indicator'], 
+        c['is_regular_candidate']
+    ))
+    logger.debug(f"ITEM_ID: {item_id_for_log} - detect_price_candidates - Found {len(candidates)} sorted candidates: {json.dumps(candidates, indent=2) if candidates else '[]'}")
+    return candidates
 
+def validate_price_pair(offer_price, regular_price, item_id_for_log="N/A"):
+    op, rp = offer_price, regular_price
+    if op is not None: op = float(op)
+    if rp is not None: rp = float(rp)
+
+    if op is None or rp is None:
+        logger.debug(f"ITEM_ID: {item_id_for_log} - validate_price_pair - One price is None (O:{op}, R:{rp}). No swap.")
+        return op, rp
+    
+    if op > rp:
+        logger.warning(f"ITEM_ID: {item_id_for_log} - validate_price_pair - Swapping prices: offer {op} > regular {rp}")
+        return rp, op
+    
+    logger.debug(f"ITEM_ID: {item_id_for_log} - validate_price_pair - Prices validated (O:{op}, R:{rp}). No swap needed or already swapped.")
+    return op, rp
+
+def find_bbox_for_text(text_to_find, textract_blocks, fuzz_threshold=80):
+    """
+    Finds the bounding box for a given text string within a list of Textract blocks.
+    Uses fuzzy matching for robustness. Returns normalized bbox (0-1).
+    """
+    if not text_to_find or not textract_blocks:
+        return None
+
+    text_to_find_lower = str(text_to_find).lower()
+    best_match_bbox = None
+    best_match_score = 0
+
+    for block in textract_blocks:
+        block_text = block.get('Text', '').lower()
+        if block_text:
+            # Use token_set_ratio for better handling of word order/extra words
+            score = fuzz.token_set_ratio(text_to_find_lower, block_text)
+            if score > best_match_score and score >= fuzz_threshold:
+                best_match_score = score
+                # Combine multiple word bounding boxes if necessary, or just use the line's bbox
+                # For simplicity, we'll try to get the overall bounding box of the matched text within the segment
+                # If block is a WORD, use its bbox. If a LINE, use its bbox.
+                bbox = block.get('Geometry', {}).get('BoundingBox')
+                if bbox:
+                    best_match_bbox = {
+                        'x_min': bbox['Left'],
+                        'y_min': bbox['Top'],
+                        'x_max': bbox['Left'] + bbox['Width'],
+                        'y_max': bbox['Top'] + bbox['Height']
+                    }
+    logger.debug(f"Found bbox for '{text_to_find}' with score {best_match_score}: {best_match_bbox}")
+    return best_match_bbox
+
+def extract_product_data_with_llm(product_snippet_text: str, item_id_for_log="N/A", llm_model: str = "gpt-4o", textract_blocks_in_segment: list = None) -> dict: # NEW parameter
+    if not openai_client_instance:
+        logger.error(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - OpenAI client not initialized.")
+        return {"error_message": "OpenAI client not initialized", "llm_input_snippet": product_snippet_text}
+        
+    logger.info(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - Sending snippet to Text LLM ({llm_model}).")
+    logger.debug(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - Snippet Text:\n{product_snippet_text}")
+
+    system_prompt = """You are an expert at extracting product information from advertisement text. Extract the following fields:
+
+CRITICAL RULES FOR PRICE EXTRACTION:
+1. If the text starts with "[GEOM_PRICE: X YZ]", prioritize this X.YZ as the offer_price. E.g., "[GEOM_PRICE: 6 97]" means offer_price is 6.97.
+2. For 3-digit numbers like "897", "647", "447" presented as the main price - these represent prices like 8.97, 6.47, 4.47.
+3. For 4-digit numbers like "1097" presented as the main price - this represents 10.97.
+4. For prices like "8 97" (space separated), interpret as 8.97.
+5. The offer_price is usually the first/most prominent price in the snippet (after any [GEOM_PRICE] marker).
+6. Regular price usually appears after "Regular", "Reg.", or "Precio Regular" keyword.
+7. Prices should generally NOT exceed 100.00 for these grocery/household items unless it's clearly a large appliance/furniture.
+8. For "N for $X" or "N x $X" deals (e.g., "2x $5.00" or "2 for $5.00"), if this is the offer, the offer_price should be the price PER ITEM (e.g., $2.50). If there's a coupon modifying this (e.g., "2x $5.00 *Cupón... = 2x $4.50"), calculate the final price PER ITEM.
+
+Fields to extract:
+- "offer_price": The sale/promotional price PER ITEM. Return as a decimal number.
+- "regular_price": The original price PER ITEM. Return as a decimal number.
+- "product_brand": The brand name.
+- "product_name_core": The main product name.
+- "product_variant_description": The descriptive text, including size, quantity, flavor, type etc.
+- "size_quantity_info": Specific size/quantity extracted (e.g., "105 a 117 onzas", "21 onzas", "6=12 Rollos").
+    - CRITICALLY IMPORTANT FOR SIZE: Only extract size and quantity information that is EXPLICITLY STATED in the provided text.
+    - Do NOT guess, infer, or assume any size or quantity.
+    - If the size or quantity is unclear or not present in the snippet, return null or an empty string for this field.
+    - Do NOT invent values like "120 ct" if it's not directly supported by the input text.
+- "unit_indicator": Like "c/u", "ea." if present near a price.
+- "store_specific_terms": Like "*24 por tienda", coupon details if not part of price.
+
+IMPORTANT: Return prices as decimal numbers (e.g., 8.97), not strings. Use null if missing.
+If product_variant_description contains size, also extract to size_quantity_info following the strict rules above.
+
+Return ONLY a JSON object.
+"""
+    few_shot_examples = [
+        {"role": "user", "content": "Text:\n[GEOM_PRICE: 6 97]\n97 c/u\nAce Simply\nDetergente Líquido 84 onzas\nRegular $7.99 c/u\n*24 por tienda\n\nReturn JSON."},
+        {"role": "assistant", "content": """{
+"offer_price": 6.97, "regular_price": 7.99, "product_brand": "Ace", "product_name_core": "Ace Simply",
+"product_variant_description": "Detergente Líquido 84 onzas", "size_quantity_info": "84 onzas",
+"unit_indicator": "c/u", "store_specific_terms": "*24 por tienda"
+}"""},
+        {"role": "user", "content": "Text:\n897 c/u\nAce Simply\nDetergente Líquido 105 a 117 onzas\nRegular $10.49 c/u\n*24 por tienda\n\nReturn JSON."},
+        {"role": "assistant", "content": """{
+"offer_price": 8.97, "regular_price": 10.49, "product_brand": "Ace", "product_name_core": "Ace Simply",
+"product_variant_description": "Detergente Líquido 105 a 117 onzas", "size_quantity_info": "105 a 117 onzas",
+"unit_indicator": "c/u", "store_specific_terms": "*24 por tienda"
+}"""}
+    ]
+    messages = [{"role": "system", "content": system_prompt}]
+    messages.extend(few_shot_examples)
+    messages.append({"role": "user", "content": f"Text:\n{product_snippet_text}\n\nReturn JSON."})
+
+    try:
+        chat_completion = openai_client_instance.chat.completions.create(
+            model=llm_model, messages=messages, response_format={"type": "json_object"}, temperature=0.1
+        )
+        response_content = chat_completion.choices[0].message.content
+        logger.debug(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - Text LLM Raw Response Content: {response_content}")
+        if response_content is None:
+            logger.error(f"ITEM_ID: {item_id_for_log} - Text LLM returned None content.")
+            return {"error_message": "Text LLM returned no content", "llm_input_snippet": product_snippet_text}
+
+        extracted_data = json.loads(response_content)
+        logger.debug(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - LLM Data (after json.loads): {json.dumps(extracted_data, indent=2)}")
+        
+        extracted_data['offer_price'] = parse_price_string(extracted_data.get('offer_price'), item_id_for_log=f"{item_id_for_log}-llm_offer")
+        extracted_data['regular_price'] = parse_price_string(extracted_data.get('regular_price'), item_id_for_log=f"{item_id_for_log}-llm_regular")
+        
+        expected_fields = ["product_brand", "product_name_core", "product_variant_description", "size_quantity_info", "offer_price", "regular_price", "unit_indicator", "store_specific_terms"]
+        for field in expected_fields:
+            if field not in extracted_data: extracted_data[field] = None
+
+        # NEW: Find bounding boxes using Textract blocks
+        if textract_blocks_in_segment:
+            for field in ["offer_price", "regular_price", "product_brand", "product_name_core", "product_variant_description", "size_quantity_info", "unit_indicator", "store_specific_terms"]:
+                field_value = extracted_data.get(field)
+                if field_value is not None:
+                    # Convert price floats back to string for fuzzy matching (e.g. 6.97 to "6.97")
+                    if field in ["offer_price", "regular_price"]:
+                        field_value_str = f"{field_value:.2f}" if isinstance(field_value, (float, int)) else str(field_value)
+                    else:
+                        field_value_str = str(field_value)
+                    
+                    bbox = find_bbox_for_text(field_value_str, textract_blocks_in_segment)
+                    if bbox:
+                        extracted_data[f"{field}_bbox"] = bbox
+                        logger.debug(f"ITEM_ID: {item_id_for_log} - Found Textract bbox for {field}: {bbox}")
+                    else:
+                        logger.debug(f"ITEM_ID: {item_id_for_log} - No Textract bbox found for {field} text: '{field_value_str}'")
+
+        logger.info(f"ITEM_ID: {item_id_for_log} - Successfully extracted and parsed data from Text LLM.")
+        logger.debug(f"ITEM_ID: {item_id_for_log} - Parsed LLM Data: {json.dumps(extracted_data, indent=2)}")
+        return extracted_data
+    except json.JSONDecodeError as je:
+        logger.error(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - JSONDecodeError: {je}. Response: {response_content}", exc_info=True)
+        return {"error_message": f"JSONDecodeError: {je}", "llm_input_snippet": product_snippet_text, "llm_response_content": response_content}
     except Exception as e:
-        print(f"Critical error during renaming process: {e}")
+        logger.error(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - Error in Text LLM processing: {e}", exc_info=True)
+        return {"error_message": str(e), "llm_input_snippet": product_snippet_text, "llm_response_content": locals().get("response_content", "N/A")}
 
+
+def get_segment_image_bytes(page_image_pil: Image.Image, box_coords_pixels_center_wh: dict, item_id_for_log="N/A") -> BytesIO | None:
+    try:
+        if not all(k in box_coords_pixels_center_wh for k in ['x', 'y', 'width', 'height']):
+            logger.error(f"ITEM_ID: {item_id_for_log} - get_segment_image_bytes - Invalid box_coords: {box_coords_pixels_center_wh}")
+            return None
+
+        cx, cy, w, h = (box_coords_pixels_center_wh['x'], box_coords_pixels_center_wh['y'],
+                        box_coords_pixels_center_wh['width'], box_coords_pixels_center_wh['height'])
+        
+        padding_factor = 0.05 
+        padding_x = int(w * padding_factor)
+        padding_y = int(h * padding_factor)
+        
+        x_min = int(cx - w / 2) - padding_x
+        y_min = int(cy - h / 2) - padding_y
+        x_max = int(cx + w / 2) + padding_x
+        y_max = int(cy + h / 2) + padding_y
+        
+        img_width, img_height = page_image_pil.size
+        x_min_clamped = max(0, x_min)
+        y_min_clamped = max(0, y_min)
+        x_max_clamped = min(img_width, x_max)
+        y_max_clamped = min(img_height, y_max)
+
+        if x_min_clamped >= x_max_clamped or y_min_clamped >= y_max_clamped:
+            logger.warning(f"ITEM_ID: {item_id_for_log} - get_segment_image_bytes - Invalid crop coords after clamping: ({x_min_clamped}, {y_min_clamped}, {x_max_clamped}, {y_max_clamped}). Original: ({x_min}, {y_min}, {x_max}, {y_max})")
+            return None
+            
+        segment_image_pil = page_image_pil.crop((x_min_clamped, y_min_clamped, x_max_clamped, y_max_clamped))
+        
+        # Optional: Draw border for debugging saved images - remove for production if not needed
+        # from PIL import ImageDraw
+        # draw = ImageDraw.Draw(segment_image_pil)
+        # draw.rectangle([(0, 0), (segment_image_pil.width-1, segment_image_pil.height-1)], 
+        #                outline="red", width=3)
+        
+        img_byte_arr = BytesIO()
+        segment_image_pil.save(img_byte_arr, format='JPEG', quality=95)
+        img_byte_arr.seek(0)
+        logger.debug(f"ITEM_ID: {item_id_for_log} - get_segment_image_bytes - Successfully cropped segment image. Coords: ({x_min_clamped}, {y_min_clamped}, {x_max_clamped}, {y_max_clamped})")
+        return img_byte_arr
+    except Exception as e:
+        logger.error(f"ITEM_ID: {item_id_for_log} - get_segment_image_bytes - Error cropping segment image: {e}", exc_info=True)
+        return None
+
+# backend_processor.py
+
+# ... (imports and existing global initializations) ...
+
+# Ensure PIL's ImageDraw is imported for drawing utilities
+from PIL import ImageDraw # Add this import
+
+# ... (existing helper functions like parse_price_string, detect_price_candidates, etc.) ...
+
+# backend_processor.py
+
+# ... (existing functions) ...
+
+def re_extract_with_vision_llm(segment_image_bytes: BytesIO, item_id_for_log="N/A", original_item_name: str | None = None, llm_model: str = "gpt-4o") -> dict:
+    if not openai_client_instance:
+        logger.error(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - OpenAI client not configured for vision.")
+        return {"error_message": "OpenAI client not configured for vision."}
+    if not segment_image_bytes:
+        logger.error(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - No segment image provided.")
+        return {"error_message": "No segment image for vision."}
+        
+    response_content = None
+    try:
+        base64_image = base64.b64encode(segment_image_bytes.getvalue()).decode('utf-8')
+        logger.debug(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - Base64 image snippet for Vision LLM: {base64_image[:100]}...")
+
+        # Simplified prompt: NO REQUEST FOR BOUNDING BOXES FROM VISION LLM
+        prompt_text = (
+            "You are an expert product data extractor for retail flyer segments. "
+            "From the provided image of a single product deal, extract the following information. "
+            "Pay close attention to visually prominent numbers for prices. "
+            "If a price is shown as 'XYZ' (e.g., '897'), interpret it as X.YZ dollars (e.g., $8.97). "
+            "If a price is 'X YZ' (e.g., '6 47'), interpret it as X.YZ dollars (e.g., $6.47). "
+            "For 'N for $M' or 'NxM' deals (e.g., '2x300' where 300 means $3.00, or '2 for $5.00'), the offer_price should be the price PER ITEM (e.g., $1.50 or $2.50). "
+            "If coupon details are present and modify the price, calculate the final per-item offer_price."
+            "\n\n"
+            "Fields to extract:\n"
+            "- \"offer_price\": The final sale/promotional price per item. Return as a decimal number. If not found, null.\n"
+            "- \"regular_price\": The original price per item. Return as a decimal number.\n"
+            "- \"product_brand\": The brand name.\n"
+            "- \"product_name_core\": The main product name.\n"
+            "- \"product_variant_description\": Detailed description including flavor, type etc.\n"
+            "- \"size_quantity_info\": Specific size/quantity (e.g., '105 a 117 onzas', '21 oz', '6=12 Rollos', 'Paquete de 2').\n"
+            "    - CRITICALLY IMPORTANT FOR SIZE (from image): Only extract size and quantity information that is CLEARLY AND EXPLICITLY VISIBLE in the provided image segment.\n"
+            "    - Do NOT guess, infer, or assume any size or quantity if it's ambiguous or not present.\n"
+            "    - If the size or quantity is unclear or not visible, return null or an empty string for this field.\n"
+            "    - Pay very close attention to the actual numbers and units visible; do not hallucinate common but incorrect values like '120 ct' unless explicitly visible.\n"
+            "- \"unit_indicator\": Like 'c/u', 'ea.' if present near a price.\n"
+            "- \"store_specific_terms\": Like store limits or uncalculated coupon details.\n"
+            "Return ONLY a JSON object with these fields. Use null for missing fields."
+        )
+        if original_item_name: prompt_text += f"\nThe product is likely related to: '{original_item_name}'.\n"
+        
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}]
+        
+        logger.info(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - Sending segment image to Vision LLM ({llm_model}). Hint: '{original_item_name}'.")
+        
+        chat_completion = openai_client_instance.chat.completions.create(
+            model=llm_model, messages=messages, response_format={"type": "json_object"}, max_tokens=1000, temperature=0.1
+        )
+        response_content = chat_completion.choices[0].message.content
+        logger.debug(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - Vision LLM Raw Response Content: {response_content}")
+        
+        if response_content is None:
+            logger.error(f"ITEM_ID: {item_id_for_log} - Vision LLM returned None content. Cannot parse JSON.")
+            return {"error_message": "Vision LLM returned no content", "vision_llm_used": True}
+
+        extracted_data_parsed = json.loads(response_content) # No special bbox parsing here
+        
+        logger.debug(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - Vision LLM Data (raw): {json.dumps(extracted_data_parsed, indent=2)}")
+
+        extracted_data_parsed["offer_price"] = parse_price_string(extracted_data_parsed.get("offer_price"), item_id_for_log=f"{item_id_for_log}-vision_offer")
+        extracted_data_parsed["regular_price"] = parse_price_string(extracted_data_parsed.get("regular_price"), item_id_for_log=f"{item_id_for_log}-vision_regular")
+        
+        extracted_data_parsed["vision_llm_used"] = True
+        logger.info(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - Successfully extracted data from Vision LLM.")
+        return extracted_data_parsed
+    except json.JSONDecodeError as je:
+        logger.error(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - JSONDecodeError: {je}. Response: {response_content}", exc_info=True)
+        return {"error_message": f"JSONDecodeError: {je}", "vision_llm_used": True, "vision_llm_response_content": response_content}
+    except Exception as e:
+        logger.error(f"ITEM_ID: {item_id_for_log} - re_extract_with_vision_llm - Error calling Vision LLM API: {e}", exc_info=True)
+        return {"error_message": str(e), "vision_llm_used": True, "vision_llm_response_content": response_content}
+
+# ... (rest of the existing helper functions) ...
+
+
+def upload_to_s3(file_like_object, bucket_name, cloud_object_name):
+    if not s3_client:
+        logger.error("S3 client not initialized. Cannot upload.")
+        return None
+    try:
+        # file_like_object is already BytesIO, so pass directly
+        s3_client.upload_fileobj(file_like_object, bucket_name, cloud_object_name)
+        logger.info(f"File '{cloud_object_name}' uploaded to S3 bucket '{bucket_name}'.")
+        return cloud_object_name
+    except Exception as e:
+        logger.error(f"Error uploading file '{cloud_object_name}' to S3: {e}", exc_info=True)
+        return None
+
+def get_analysis_from_document_via_textract(bucket_name, document_s3_key):
+    if not textract_client:
+        logger.error("Textract client not initialized. Cannot analyze.")
+        return None
+    logger.info(f"Starting Textract Document Analysis for S3 object: s3://{bucket_name}/{document_s3_key}")
+    try:
+        response = textract_client.start_document_analysis(
+            DocumentLocation={'S3Object': {'Bucket': bucket_name, 'Name': document_s3_key}},
+            FeatureTypes=['TABLES', 'FORMS', 'LAYOUT'] 
+        )
+        job_id = response['JobId']
+        logger.info(f"Textract Analysis job started (JobId: '{job_id}') for '{document_s3_key}'.")
+        
+        status = 'IN_PROGRESS'
+        max_retries = 90 
+        retries = 0
+        all_blocks = [] 
+        job_status_response = None # Define for broader scope
+        
+        while status == 'IN_PROGRESS' and retries < max_retries:
+            time.sleep(5) 
+            job_status_response = textract_client.get_document_analysis(JobId=job_id)
+            status = job_status_response['JobStatus']
+            logger.debug(f"Textract Analysis job status for '{job_id}': {status} (Retry {retries+1}/{max_retries})")
+            retries += 1
+            
+        if status == 'SUCCEEDED':
+            nextToken = None
+            # Ensure job_status_response is used for the first call if no NextToken yet
+            current_response_data = job_status_response 
+            while True:
+                page_blocks = current_response_data.get("Blocks", [])
+                logger.debug(f"Textract SUCCEEDED page fetch for '{document_s3_key}', JobId '{job_id}'. Fetched {len(page_blocks)} blocks for this page/token.")
+                all_blocks.extend(page_blocks)
+                nextToken = current_response_data.get('NextToken')
+                if not nextToken:
+                    break
+                # Fetch next set of results only if nextToken exists
+                current_response_data = textract_client.get_document_analysis(JobId=job_id, NextToken=nextToken)
+
+            logger.info(f"Textract Analysis SUCCEEDED for '{document_s3_key}'. Found {len(all_blocks)} blocks in total.")
+            return all_blocks
+        else:
+            logger.error(f"Textract Analysis job for '{document_s3_key}' status: {status}. Response: {job_status_response}")
+            return None
+    except Exception as e:
+        logger.error(f"Error in Textract Analysis for '{document_s3_key}': {e}", exc_info=True)
+        return None
+
+def delete_from_s3(bucket_name, cloud_object_name):
+    if not s3_client:
+        logger.warning("S3 client not initialized. Cannot delete.") # Warning as it's cleanup
+        return
+    try:
+        s3_client.delete_object(Bucket=bucket_name, Key=cloud_object_name)
+        logger.info(f"File '{cloud_object_name}' deleted from S3 bucket '{bucket_name}'.")
+    except Exception as e:
+        logger.error(f"Error deleting file '{cloud_object_name}' from S3: {e}", exc_info=True)
+
+def clean_text(text): 
+    if not text:
+        return ""
+    lines = text.splitlines()
+    processed_lines = []
+    for line_content in lines:
+        stripped_line = line_content.strip()
+        if stripped_line: 
+            processed_lines.append(re.sub(r'\s+', ' ', stripped_line))
+    return "\n".join(processed_lines)
+
+def get_roboflow_predictions_sdk(pil_image_object, original_filename_for_temp="temp_image.jpg"):
+    if not roboflow_model_object:
+        logger.error("Roboflow model object is not configured/initialized. Cannot get predictions.")
+        return None # Return empty list or None consistently
+    
+    temp_file_path = None
+    # Use tempfile for Roboflow temporary images as well
+    try:
+        # Create a temporary file with a proper image extension
+        suffix = ".jpg" if original_filename_for_temp.lower().endswith((".jpg", ".jpeg")) else ".png"
+        if not original_filename_for_temp.lower().endswith((".jpg", ".jpeg", ".png")):
+             original_filename_for_temp += ".jpg" # Default to JPG if no valid ext
+             suffix = ".jpg"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="rf_temp_") as tmp_rf_img:
+            pil_image_object.save(tmp_rf_img.name, format="JPEG" if suffix == ".jpg" else "PNG")
+            temp_file_path = tmp_rf_img.name
+        
+        logger.info(f"Saved PIL image temporarily to {temp_file_path} for Roboflow.")
+        
+        prediction_result_obj = roboflow_model_object.predict(temp_file_path, confidence=40, overlap=30)
+        
+        actual_predictions_data = []
+        if hasattr(prediction_result_obj, 'json') and callable(prediction_result_obj.json):
+            json_response = prediction_result_obj.json()
+            actual_predictions_data = json_response.get('predictions', [])
+            logger.debug(f"Roboflow raw JSON response: {json.dumps(json_response, indent=2)}")
+        elif hasattr(prediction_result_obj, 'predictions'): 
+            actual_predictions_data = [p.json() for p in prediction_result_obj.predictions]
+            logger.debug(f"Roboflow predictions (from .predictions attribute): {json.dumps(actual_predictions_data, indent=2)}")
+        elif isinstance(prediction_result_obj, list): 
+            actual_predictions_data = prediction_result_obj
+            logger.debug(f"Roboflow predictions (already a list): {json.dumps(actual_predictions_data, indent=2)}")
+        else:
+            logger.warning(f"Unexpected Roboflow prediction result format: {type(prediction_result_obj)}. Trying to iterate...")
+            try: 
+                actual_predictions_data = [p.json() if hasattr(p, 'json') else p for p in prediction_result_obj]
+            except TypeError:
+                logger.error("Could not process Roboflow prediction object.")
+                return [] # Return empty list
+
+        predictions_list = []
+        for i, p_data in enumerate(actual_predictions_data):
+            pred_dict = {
+                'x': p_data.get('x'), 'y': p_data.get('y'),
+                'width': p_data.get('width'), 'height': p_data.get('height'),
+                'confidence': p_data.get('confidence'),
+                'class': p_data.get('class', p_data.get('class_name', 'unknown')) 
+            }
+            if not all(isinstance(pred_dict[k], (int, float)) for k in ['x', 'y', 'width', 'height'] if pred_dict[k] is not None): # Check for None
+                logger.warning(f"Skipping Roboflow prediction #{i} with invalid or missing coordinates: {pred_dict}")
+                continue
+            predictions_list.append(pred_dict)
+            
+        logger.info(f"Processed {len(predictions_list)} valid Roboflow predictions.")
+        return predictions_list
+        
+    except Exception as e:
+        logger.error(f"Error in get_roboflow_predictions_sdk: {e}", exc_info=True)
+        return None # Or empty list
     finally:
-        # Cleanup any remaining temporary files
-        for temp_path, new_path, old_name, new_name in temp_files:
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.unlink(temp_file_path)
+                logger.debug(f"Deleted temp Roboflow image: {temp_file_path}")
+            except Exception as e_del:
+                logger.error(f"Error deleting temp Roboflow image file {temp_file_path}: {e_del}")
+
+# backend_processor.py
+
+# ... (existing imports) ...
+
+def collate_text_for_product_boxes(roboflow_boxes, textract_all_blocks, blocks_map,
+                                   image_width_px, image_height_px, page_id_for_log="N/A"):
+    product_texts_with_candidates = []
+    if not roboflow_boxes or not textract_all_blocks or not blocks_map or \
+       image_width_px is None or image_height_px is None:
+        logger.warning(f"PAGE_ID: {page_id_for_log} - collate_text_for_product_boxes: Missing critical inputs.")
+        return product_texts_with_candidates
+
+    logger.info(f"PAGE_ID: {page_id_for_log} - collate_text_for_product_boxes - Starting smart collation for {len(roboflow_boxes)} Roboflow boxes.")
+    
+    all_words_on_page = [block for block in textract_all_blocks if block['BlockType'] == 'WORD']
+    all_lines_on_page = [block for block in textract_all_blocks if block['BlockType'] == 'LINE']
+
+    for i, box_pred in enumerate(roboflow_boxes):
+        item_id_for_log = f"{page_id_for_log}-RFBox{i}-{str(box_pred.get('class', 'UnknownClass'))}"
+        logger.debug(f"ITEM_ID: {item_id_for_log} - collate_text_for_product_boxes - Processing Roboflow Box: {json.dumps(box_pred)}")
+
+        rf_center_x_px, rf_center_y_px = box_pred.get('x'), box_pred.get('y')
+        rf_width_px, rf_height_px = box_pred.get('width'), box_pred.get('height')
+        
+        if not all(isinstance(v, (int, float)) for v in [rf_center_x_px, rf_center_y_px, rf_width_px, rf_height_px]):
+            logger.warning(f"ITEM_ID: {item_id_for_log} - collate_text_for_product_boxes - Roboflow Box has invalid coordinates. Skipping.")
+            continue
+            
+        rf_x_min_rel = (rf_center_x_px - rf_width_px / 2.0) / image_width_px
+        rf_y_min_rel = (rf_center_y_px - rf_height_px / 2.0) / image_height_px
+        rf_x_max_rel = (rf_center_x_px + rf_width_px / 2.0) / image_width_px
+        rf_y_max_rel = (rf_center_y_px + rf_height_px / 2.0) / image_height_px
+        logger.debug(f"ITEM_ID: {item_id_for_log} - Roboflow Box Rel Coords (xmin,ymin,xmax,ymax): ({rf_x_min_rel:.4f}, {rf_y_min_rel:.4f}, {rf_x_max_rel:.4f}, {rf_y_max_rel:.4f})")
+        
+        words_in_rf_box = []
+        for word_block in all_words_on_page:
+            geom = word_block.get('Geometry', {}).get('BoundingBox', {})
+            if not geom: continue
+            word_center_x = geom['Left'] + geom['Width'] / 2
+            word_center_y = geom['Top'] + geom['Height'] / 2
+            if rf_x_min_rel <= word_center_x <= rf_x_max_rel and \
+               rf_y_min_rel <= word_center_y <= rf_y_max_rel and \
+               word_block.get('Confidence', 0) >= GEOM_MERGE_MIN_WORD_CONFIDENCE:
+                words_in_rf_box.append(word_block)
+        
+        words_in_rf_box.sort(key=lambda w: (w['Geometry']['BoundingBox']['Top'], w['Geometry']['BoundingBox']['Left']))
+        
+        logger.debug(f"ITEM_ID: {item_id_for_log} - Found {len(words_in_rf_box)} WORD blocks with >={GEOM_MERGE_MIN_WORD_CONFIDENCE}% conf inside this Roboflow box.")
+
+        merged_geom_price_str = None
+        used_word_ids_for_geom_price = set()
+
+        for idx_w1, w1 in enumerate(words_in_rf_box):
+            if w1['Id'] in used_word_ids_for_geom_price: continue
+            w1_text = w1.get('Text', '')
+            w1_geom_box = w1.get('Geometry', {}).get('BoundingBox')
+            
+            if not (re.fullmatch(r'[1-9]\d?', w1_text) and w1_geom_box):  # Adjusted to catch 1 or 2 digits for dollars in geometric merge
+                continue
+            logger.debug(f"ITEM_ID: {item_id_for_log} - GeomMerge: Potential dollar part w1='{w1_text}' (ID: {w1['Id']})")
+
+            for idx_w2 in range(idx_w1 + 1, len(words_in_rf_box)):
+                w2 = words_in_rf_box[idx_w2]
+                if w2['Id'] in used_word_ids_for_geom_price: continue
+                w2_text = w2.get('Text', '')
+                w2_geom_box = w2.get('Geometry', {}).get('BoundingBox')
+
+                if not (re.fullmatch(r'\d{2}', w2_text) and w2_geom_box): # Potential two cents digits
+                    continue
+                logger.debug(f"ITEM_ID: {item_id_for_log} - GeomMerge: Potential cents w2='{w2_text}' (ID: {w2['Id']}) for w1='{w1_text}'")
+                
+                w1_cy = w1_geom_box['Top'] + w1_geom_box['Height'] / 2
+                w2_cy = w2_geom_box['Top'] + w2_geom_box['Height'] / 2
+                y_diff_abs = abs(w1_cy - w2_cy)
+                y_tolerance = w1_geom_box['Height'] * Y_ALIGN_TOLERANCE_FACTOR
+                
+                w1_right_edge = w1_geom_box['Left'] + w1_geom_box['Width']
+                horizontal_gap = w2_geom_box['Left'] - w1_right_edge
+                x_tolerance = w1_geom_box['Width'] * X_SPACING_TOLERANCE_FACTOR
+                
+                height_compatible = (w2_geom_box['Height'] < (w1_geom_box['Height'] * CENTS_MAX_HEIGHT_FACTOR)) and \
+                                    (w2_geom_box['Height'] > (w1_geom_box['Height'] * (1/CENTS_MAX_HEIGHT_FACTOR*0.8) ))
+
+                vertically_aligned = y_diff_abs < y_tolerance
+                horizontally_close_and_ordered = 0 <= horizontal_gap < x_tolerance
+
+                logger.debug(f"ITEM_ID: {item_id_for_log} - GeomMerge Cand: w1='{w1_text}', w2='{w2_text}'. "
+                                             f"V-Align: {vertically_aligned} (y_diff:{y_diff_abs:.4f} vs tol:{y_tolerance:.4f}). "
+                                             f"H-Close: {horizontally_close_and_ordered} (gap:{horizontal_gap:.4f} vs tol:{x_tolerance:.4f}). "
+                                             f"H-Compat: {height_compatible} (h1:{w1_geom_box['Height']:.4f}, h2:{w2_geom_box['Height']:.4f})")
+
+                if vertically_aligned and horizontally_close_and_ordered and height_compatible:
+                    merged_geom_price_str = f"[GEOM_PRICE: {w1_text} {w2_text}]"
+                    used_word_ids_for_geom_price.add(w1['Id'])
+                    used_word_ids_for_geom_price.add(w2['Id'])
+                    logger.info(f"ITEM_ID: {item_id_for_log} - collate_text_for_product_boxes - Geometrically merged price candidate found: '{merged_geom_price_str}' from w1:'{w1_text}' (ID:{w1['Id']}) and w2:'{w2['Id']})")
+                    break
+            if merged_geom_price_str:
+                break
+
+        lines_in_box_objects = []
+        # Get LINE blocks that are inside the Roboflow box
+        for line_block in all_lines_on_page:
+            txt_geom = line_block.get('Geometry', {}).get('BoundingBox', {})
+            if not txt_geom: continue
+            line_center_x_rel = txt_geom['Left'] + (txt_geom['Width'] / 2.0)
+            line_center_y_rel = txt_geom['Top'] + (txt_geom['Height'] / 2.0)
+            if (rf_x_min_rel <= line_center_x_rel <= rf_x_max_rel and \
+                rf_y_min_rel <= line_center_y_rel <= rf_y_max_rel):
+                logger.debug(f"ITEM_ID: {item_id_for_log} - LineCollation: Considering LINE '{line_block.get('Text', '')}' (ID: {line_block['Id']}) Geom: {json.dumps(txt_geom)}")
+                lines_in_box_objects.append(line_block)
+        
+        lines_in_box_objects.sort(key=lambda line: (
+            line['Geometry']['BoundingBox']['Top'],
+            -line['Geometry']['BoundingBox']['Height'],
+            line['Geometry']['BoundingBox']['Left']
+        ))
+        
+        ordered_lines_text_parts = []
+        # Store detailed blocks for later lookup
+        detailed_blocks_in_segment = [] # NEW: Store all relevant textract blocks
+        for line_block in lines_in_box_objects:
+            line_words_for_text = []
+            if 'Relationships' in line_block:
+                for relationship in line_block['Relationships']:
+                    if relationship['Type'] == 'CHILD':
+                        for child_id in relationship['Ids']:
+                            word = blocks_map.get(child_id)
+                            if word and word['BlockType'] == 'WORD' and child_id not in used_word_ids_for_geom_price:
+                                line_words_for_text.append(word['Text'])
+                                detailed_blocks_in_segment.append(word) # Add words that contribute to collated text
+            
+            line_text = " ".join(line_words_for_text).strip()
+            
+            if line_text:
+                ordered_lines_text_parts.append(line_text)
+            elif not line_words_for_text and line_block.get('Text') and \
+                any(cid in used_word_ids_for_geom_price for rel in line_block.get('Relationships', []) if rel['Type'] == 'CHILD' for cid in rel.get('Ids',[])):
+                logger.debug(f"ITEM_ID: {item_id_for_log} - LineCollation: Line '{line_block.get('Text')}' fully consumed by geometric merge, not adding to collated text.")
+            elif not line_text and line_block.get('Text'):
+                all_words_used = True
+                if 'Relationships' in line_block:
+                    for relationship in line_block['Relationships']:
+                        if relationship['Type'] == 'CHILD':
+                            if not all(child_id in used_word_ids_for_geom_price for child_id in relationship['Ids'] if blocks_map.get(child_id, {}).get('BlockType') == 'WORD'):
+                                all_words_used = False
+                                break
+                    if not all_words_used :
+                        ordered_lines_text_parts.append(line_block.get('Text','').strip())
+                        detailed_blocks_in_segment.append(line_block) # Add line if it was not fully consumed by geom price
+                elif line_block.get('Text','').strip():
+                    ordered_lines_text_parts.append(line_block.get('Text','').strip())
+                    detailed_blocks_in_segment.append(line_block) # Add line if it had text but no children
+
+        collated_text_multiline = "\n".join(ordered_lines_text_parts)
+        collated_text_cleaned = clean_text(collated_text_multiline)
+
+        if merged_geom_price_str:
+            collated_text_cleaned = f"{merged_geom_price_str}\n{collated_text_cleaned}".strip()
+            logger.info(f"ITEM_ID: {item_id_for_log} - Prepended geometric price. New collated text starts with: {merged_geom_price_str}")
+
+        price_candidates_for_segment = detect_price_candidates(lines_in_box_objects, image_height_px, blocks_map, item_id_for_log=item_id_for_log, prepended_geom_price=merged_geom_price_str if merged_geom_price_str else None)
+
+        logger.debug(f"ITEM_ID: {item_id_for_log} - collate_text_for_product_boxes - Sorted Lines Text for Collation (after potential geom exclusion): {json.dumps(ordered_lines_text_parts)}")
+        logger.info(f"ITEM_ID: {item_id_for_log} - collate_text_for_product_boxes - Final Collated Text (cleaned) for LLM:\n{collated_text_cleaned}")
+
+        if collated_text_cleaned or merged_geom_price_str:
+            product_texts_with_candidates.append({
+                "product_box_id": item_id_for_log,
+                "roboflow_confidence": box_pred.get('confidence', 0.0),
+                "class_name": str(box_pred.get('class', 'UnknownClass')),
+                "collated_text": collated_text_cleaned,
+                "price_candidates": price_candidates_for_segment,
+                "roboflow_box_coords_pixels_center_wh": {
+                    'x': rf_center_x_px, 'y': rf_center_y_px,
+                    'width': rf_width_px, 'height': rf_height_px
+                },
+                "textract_blocks_in_segment": detailed_blocks_in_segment # NEW: Store Textract blocks
+            })
+    
+    logger.info(f"PAGE_ID: {page_id_for_log} - collate_text_for_product_boxes - Collation complete. Generated {len(product_texts_with_candidates)} product text snippets.")
+    return product_texts_with_candidates
+
+# File: backend_processor.py
+
+# In backend_processor.py
+# Ensure 're' and 'json' are imported if your other logic in this function (unrelated to size) needs them.
+import re 
+import json # For logging, if used
+
+def enhanced_normalize_product_data(product_data, item_id_for_log, price_candidates=None, original_collated_text=""):
+    normalized_item_data = product_data.copy() # Start with a copy
+
+    # Ensure all expected keys are present, defaulting to None if not in product_data
+    keys_to_ensure = [
+        'offer_price', 'regular_price', 'product_brand', 'product_name_core',
+        'product_variant_description', 'size_quantity_info', 'unit_indicator',
+        'store_specific_terms', 'parsed_size_details', 'size_quantity_info_normalized',
+        'validation_flags'
+    ]
+    for key in keys_to_ensure:
+        normalized_item_data.setdefault(key, None)
+    
+    if not isinstance(normalized_item_data.get('validation_flags'), list):
+        normalized_item_data['validation_flags'] = []
+
+    # --- For THIS TEST, we will NOT do any size normalization here ---
+    # The size fields will be handled directly in post_process_and_validate_item_data
+    # Just ensure the original size_quantity_info from LLM is preserved if it exists.
+    sqi = normalized_item_data.get('size_quantity_info')
+    if sqi is not None:
+        normalized_item_data['size_quantity_info'] = str(sqi).strip()
+    else:
+        normalized_item_data['size_quantity_info'] = None
+        
+    # These will be explicitly set/overridden in the calling function for the bypass test
+    normalized_item_data['parsed_size_details'] = None 
+    normalized_item_data['size_quantity_info_normalized'] = None
+
+    logger.debug(f"ITEM_ID: {item_id_for_log} - enhanced_normalize_product_data (BYPASS MODE - minimal size processing) - "
+                 f"Input SQI: '{product_data.get('size_quantity_info')}', Output SQI: '{normalized_item_data.get('size_quantity_info')}'")
+    
+    # (Your existing logic for price candidates or other non-size normalizations can remain here if any)
+
+    return normalized_item_data
+
+# In backend_processor.py
+
+# In backend_processor.py
+
+def post_process_and_validate_item_data(llm_data, price_candidates, original_collated_text, item_id_for_log="N/A"):
+    if not isinstance(llm_data, dict):
+        logger.error(f"ITEM_ID: {item_id_for_log} - Invalid llm_data input type to post_process_and_validate_item_data: {type(llm_data)}")
+        return {"error_message": "Invalid input data for post-processing.", 
+                "validation_flags": ["Invalid input data type for post-processing."]} # Added flag
+    
+    if "error_message" in llm_data:
+        logger.warning(f"ITEM_ID: {item_id_for_log} - LLM data contains an error: {llm_data.get('error_message')}. Initializing empty fields.")
+        # Ensure basic structure even if LLM errored
+        base_keys = ['offer_price', 'regular_price', 'product_brand', 'product_name_core', 
+                     'product_variant_description', 'size_quantity_info', 'unit_indicator', 
+                     'store_specific_terms', 'parsed_size_details', 'size_quantity_info_normalized']
+        for key in base_keys:
+            llm_data.setdefault(key, None)
+        llm_data.setdefault('validation_flags', []).append(f"LLM data error: {llm_data.get('error_message')}")
+        return llm_data
+
+    # Call the simplified enhanced_normalize_product_data. It will mostly ensure keys exist.
+    item_data = enhanced_normalize_product_data(llm_data.copy(), item_id_for_log, price_candidates, original_collated_text)
+    
+    # --- TRUE BYPASS IMPLEMENTATION FOR SIZE FIELDS ---
+    logger.info(f"ITEM_ID: {item_id_for_log} - Applying BYPASS for size fields. Using raw LLM 'size_quantity_info'.")
+    
+    # Get the size_quantity_info directly from the original LLM output (llm_data)
+    raw_llm_size_info = llm_data.get('size_quantity_info')
+
+    if isinstance(raw_llm_size_info, str):
+        current_size_info = raw_llm_size_info.strip()
+        item_data['size_quantity_info'] = current_size_info  # Set the primary size field
+        item_data['size_quantity_info_normalized'] = current_size_info # Use raw for normalized
+    elif raw_llm_size_info is None:
+        item_data['size_quantity_info'] = None
+        item_data['size_quantity_info_normalized'] = None
+    else: # If it's some other type, convert to string
+        current_size_info = str(raw_llm_size_info).strip()
+        item_data['size_quantity_info'] = current_size_info
+        item_data['size_quantity_info_normalized'] = current_size_info
+        
+    item_data['parsed_size_details'] = None # Explicitly None for bypass
+
+    logger.debug(f"ITEM_ID: {item_id_for_log} - After BYPASS: "
+                 f"SQI: '{item_data.get('size_quantity_info')}', "
+                 f"Norm_SQI: '{item_data.get('size_quantity_info_normalized')}', "
+                 f"ParsedDetails: {item_data.get('parsed_size_details')}")
+    # --- END TRUE BYPASS IMPLEMENTATION ---
+
+    # --- Your existing price validation, other flag settings etc. continue here ---
+    # Ensure validation_flags list exists
+    if not isinstance(item_data.get('validation_flags'), list):
+        item_data['validation_flags'] = []
+
+    # (Your actual price validation logic, etc.)
+    # Note: The 'Size/quantity info might be missing or unparsed' flag might trigger
+    # if raw_llm_size_info is empty or None. This is expected behavior with the bypass.
+    if not item_data.get('size_quantity_info_normalized') and item_data.get('size_quantity_info'): # Check if LLM provided size but it ended up None
+         item_data['validation_flags'].append('Size/quantity info from LLM was present but resulted in None for normalized (BYPASS).')
+    elif not item_data.get('size_quantity_info'):
+         item_data['validation_flags'].append('Size/quantity info was empty/None from LLM (BYPASS).')
+
+
+    logger.debug(f"ITEM_ID: {item_id_for_log} - post_process_and_validate_item_data (SIZE BYPASSED) - Returning: "
+                 f"Offer: {item_data.get('offer_price')}, Reg: {item_data.get('regular_price')}, "
+                 f"Brand: '{item_data.get('product_brand')}', Name: '{item_data.get('product_name_core')}', "
+                 f"SQI: '{item_data.get('size_quantity_info')}', "
+                 f"Norm_SQI: '{item_data.get('size_quantity_info_normalized')}', "
+                 f"Parsed: {item_data.get('parsed_size_details')}, "
+                 f"Flags: {item_data.get('validation_flags')}")
+
+    return item_data
+
+
+# backend_processor.py
+
+# Ensure these are imported at the top of your file if not already
+import json # For logging complex objects if needed, and for P1/P2_Parsed_Size_Details
+from fuzzywuzzy import fuzz
+# import logging # Already configured
+
+# logger = logging.getLogger(__name__) # Already configured
+
+# backend_processor.py
+
+import json
+from fuzzywuzzy import fuzz
+# import logging # Already configured elsewhere
+
+# logger = logging.getLogger(__name__) # Already configured
+
+def compare_product_items(product_items1, product_items2, similarity_threshold=70):
+    logger.info(f"COMPARE_FN - Starting comparison: {len(product_items1)} items from File1 with {len(product_items2)} items from File2.")
+    comparison_report = []
+    matched_item2_indices = set()
+
+    for idx1, item1 in enumerate(product_items1):
+        item1_id_log = item1.get("product_box_id", f"File1-Item{idx1}")
+        logger.debug(f"COMPARE_FN - OuterLoop: Processing item1_id: {item1_id_log}")
+        
+        best_match_item2 = None
+        highest_similarity = 0.0
+        best_match_idx = -1
+        
+        # --- Prepare item1 texts ---
+        brand1 = str(item1.get("product_brand", "") or "").lower().strip()
+        name_core1 = str(item1.get("product_name_core", "") or "").lower().strip()
+        primary_text1 = f"{brand1} {name_core1}".strip()
+
+        size1_details = item1.get("parsed_size_details", {})
+        size1_str_norm = str(item1.get("size_quantity_info_normalized", item1.get("size_quantity_info", "")) or "").lower().strip()
+        size1_from_details = ""
+        if size1_details:
+            if "value" in size1_details and "unit" in size1_details:
+                size1_from_details = f"{size1_details['value']} {size1_details['unit']}"
+            elif "value_min" in size1_details and "value_max" in size1_details and "unit" in size1_details:
+                size1_from_details = f"{size1_details['value_min']}-{size1_details['value_max']} {size1_details['unit']}"
+            elif "value_base" in size1_details and "value_equivalent" in size1_details and "unit" in size1_details:
+                size1_from_details = f"{size1_details['value_base']}={size1_details['value_equivalent']} {size1_details['unit']}"
+        size1_final_for_item1 = (size1_from_details if size1_from_details else size1_str_norm).lower().strip()
+
+        variant1 = str(item1.get("product_variant_description", "") or "").lower().strip()
+        secondary_text1_parts = []
+        if variant1 and variant1 != primary_text1 and variant1 != size1_final_for_item1: 
+            secondary_text1_parts.append(variant1)
+        if size1_final_for_item1 and size1_final_for_item1 not in primary_text1 and (not variant1 or size1_final_for_item1 not in variant1) : 
+            secondary_text1_parts.append(size1_final_for_item1)
+        secondary_text1 = " ".join(list(dict.fromkeys(filter(None, secondary_text1_parts)))).strip()
+
+        logger.debug(f"COMPARE_FN - Item1 ID: {item1_id_log} | Primary1: '{primary_text1}' | Secondary1: '{secondary_text1}' | Size1Final: '{size1_final_for_item1}'")
+
+        if not primary_text1 and not secondary_text1:
+            logger.warning(f"COMPARE_FN - {item1_id_log} has no text for matching. Skipping.")
+            # ... (append to report for unmatchable item1 - ensure all P1_ fields are populated)
+            comparison_report.append({
+                "Comparison_Type": "Unmatchable Product in File 1 (No Text)",
+                "P1_Brand": item1.get("product_brand"), "P1_Name_Core": item1.get("product_name_core"),
+                "P1_Variant": item1.get("product_variant_description"), "P1_Size_Orig": item1.get("size_quantity_info"),
+                "P1_Size_Norm": item1.get("size_quantity_info_normalized", size1_final_for_item1),
+                "P1_Parsed_Size_Details": json.dumps(item1.get("parsed_size_details")) if item1.get("parsed_size_details") else None,
+                "P1_Offer_Price": item1.get("offer_price"), "P1_Regular_Price": item1.get("regular_price"),
+                "P1_Unit_Indicator": item1.get("unit_indicator"), "P1_Store_Terms": item1.get("store_specific_terms"),
+                "P1_Val_Flags": "; ".join(item1.get("validation_flags", [])),
+                "P1_Vision_Reprocessed": item1.get("reprocessed_by_vision_llm", False),
+                "P1_Box_ID": item1_id_log,
+            })
+            continue
+
+        for idx2, item2 in enumerate(product_items2):
+            if idx2 in matched_item2_indices: continue
+            item2_id_log = item2.get("product_box_id", f"File2-Item{idx2}")
+
+            # --- Prepare item2 texts ---
+            brand2 = str(item2.get("product_brand", "") or "").lower().strip()
+            name_core2 = str(item2.get("product_name_core", "") or "").lower().strip()
+            primary_text2 = f"{brand2} {name_core2}".strip()
+
+            size2_details = item2.get("parsed_size_details", {})
+            size2_str_norm = str(item2.get("size_quantity_info_normalized", item2.get("size_quantity_info", "")) or "").lower().strip()
+            size2_from_details = ""
+            if size2_details:
+                if "value" in size2_details and "unit" in size2_details:
+                    size2_from_details = f"{size2_details['value']} {size2_details['unit']}"
+                elif "value_min" in size2_details and "value_max" in size2_details and "unit" in size2_details:
+                    size2_from_details = f"{size2_details['value_min']}-{size2_details['value_max']} {size2_details['unit']}"
+                elif "value_base" in size2_details and "value_equivalent" in size2_details and "unit" in size2_details:
+                    size2_from_details = f"{size2_details['value_base']}={size2_details['value_equivalent']} {size2_details['unit']}"
+            size2_final_for_item2 = (size2_from_details if size2_from_details else size2_str_norm).lower().strip()
+            
+            variant2 = str(item2.get("product_variant_description", "") or "").lower().strip()
+            secondary_text2_parts = []
+            if variant2 and variant2 != primary_text2 and variant2 != size2_final_for_item2: 
+                secondary_text2_parts.append(variant2)
+            if size2_final_for_item2 and size2_final_for_item2 not in primary_text2 and (not variant2 or size2_final_for_item2 not in variant2): 
+                secondary_text2_parts.append(size2_final_for_item2)
+            secondary_text2 = " ".join(list(dict.fromkeys(filter(None, secondary_text2_parts)))).strip()
+            
+            if not primary_text2 and not secondary_text2:
+                continue
+            
+            primary_similarity = fuzz.token_set_ratio(primary_text1, primary_text2) if primary_text1 and primary_text2 else 0
+            secondary_similarity = fuzz.token_set_ratio(secondary_text1, secondary_text2) if secondary_text1 and secondary_text2 else 0
+            
+            logger.debug(f"COMPARE_FN_PAIR_SCORES - Item1: {item1_id_log} (P1: '{primary_text1}') vs Item2: {item2_id_log} (P2: '{primary_text2}') ==> PrimarySim: {primary_similarity}")
+            logger.debug(f"COMPARE_FN_PAIR_SCORES - Item1: {item1_id_log} (S1: '{secondary_text1}') vs Item2: {item2_id_log} (S2: '{secondary_text2}') ==> SecondarySim: {secondary_similarity}")
+
+            current_pair_similarity = 0.0
+            if primary_text1 and primary_text2 and secondary_text1 and secondary_text2:
+                current_pair_similarity = (primary_similarity * 0.7) + (secondary_similarity * 0.3)
+            elif primary_text1 and primary_text2:
+                current_pair_similarity = float(primary_similarity)
+            elif secondary_text1 and secondary_text2:
+                current_pair_similarity = float(secondary_similarity)
+            elif primary_text1 or primary_text2 or secondary_text1 or secondary_text2: 
+                current_pair_similarity = float(max(primary_similarity, secondary_similarity))
+            
+            logger.debug(f"COMPARE_FN_PAIR_FINAL - Item1 ID: {item1_id_log} vs Item2 ID: {item2_id_log} ==> WeightedPairSim: {current_pair_similarity:.1f}")
+
+            if current_pair_similarity > highest_similarity:
+                highest_similarity = current_pair_similarity
+                best_match_item2 = item2
+                best_match_idx = idx2
+                logger.debug(f"COMPARE_FN_UPDATE - New best match for {item1_id_log} is {item2_id_log} with new highest_similarity: {highest_similarity:.1f}")
+        
+        if best_match_item2 and highest_similarity >= similarity_threshold:
+            matched_item2_indices.add(best_match_idx)
+            best_match_item2_id_log = best_match_item2.get("product_box_id", f"File2-Item{best_match_idx}")
+            
+            # --- Correctly get size_final for best_match_item2 (P2) for reporting ---
+            _p2_size_details = best_match_item2.get("parsed_size_details", {})
+            _p2_size_str_norm = str(best_match_item2.get("size_quantity_info_normalized", best_match_item2.get("size_quantity_info", "")) or "").lower().strip()
+            _p2_size_from_details = ""
+            if _p2_size_details:
+                if "value" in _p2_size_details and "unit" in _p2_size_details: _p2_size_from_details = f"{_p2_size_details['value']} {_p2_size_details['unit']}"
+                elif "value_min" in _p2_size_details and "value_max" in _p2_size_details and "unit" in _p2_size_details: _p2_size_from_details = f"{_p2_size_details['value_min']}-{_p2_size_details['value_max']} {_p2_size_details['unit']}"
+                elif "value_base" in _p2_size_details and "value_equivalent" in _p2_size_details and "unit" in _p2_size_details: _p2_size_from_details = f"{_p2_size_details['value_base']}={_p2_size_details['value_equivalent']} {_p2_size_details['unit']}"
+            _p2_size_final_for_report = (_p2_size_from_details if _p2_size_from_details else _p2_size_str_norm).lower().strip()
+            # --- End P2 size final calculation for report ---
+
+            logger.info(f"COMPARE_FN_REPORT_DATA - For matched pair: Item1 ID: {item1_id_log}, Item2 ID: {best_match_item2_id_log}")
+            logger.info(f"COMPARE_FN_REPORT_DATA - Item1 ('{item1_id_log}') P1_Size_Orig: '{item1.get('size_quantity_info')}', P1_Size_Norm_get: '{item1.get('size_quantity_info_normalized')}', P1_size_final_for_item1_calc: '{size1_final_for_item1}'")
+            logger.info(f"COMPARE_FN_REPORT_DATA - Item2 ('{best_match_item2_id_log}') P2_Size_Orig: '{best_match_item2.get('size_quantity_info')}', P2_Size_Norm_get: '{best_match_item2.get('size_quantity_info_normalized')}', P2_size_final_for_report_calc: '{_p2_size_final_for_report}'")
+
+            logger.info(f"COMPARE_FN - Match FOUND for {item1_id_log} with {best_match_item2_id_log}. Final Highest Similarity: {highest_similarity:.1f}%")
+            
+            diff_details = []
+            offer_price1 = item1.get("offer_price")
+            offer_price2 = best_match_item2.get("offer_price")
+            regular_price1 = item1.get("regular_price")
+            regular_price2 = best_match_item2.get("regular_price")
+            price_tolerance = 0.01 
+
+            op1_f, op2_f, rp1_f, rp2_f = None, None, None, None
+            try: op1_f = float(offer_price1) if offer_price1 is not None else None
+            except: pass
+            try: op2_f = float(offer_price2) if offer_price2 is not None else None
+            except: pass
+            try: rp1_f = float(regular_price1) if regular_price1 is not None else None
+            except: pass
+            try: rp2_f = float(regular_price2) if regular_price2 is not None else None
+            except: pass
+
+            if (op1_f is not None and op2_f is not None and abs(op1_f - op2_f) > price_tolerance) or \
+               (op1_f is None and op2_f is not None) or (op1_f is not None and op2_f is None):
+                diff_details.append(f"Offer Price: F1=${offer_price1 if offer_price1 is not None else 'N/A'} vs F2=${offer_price2 if offer_price2 is not None else 'N/A'}")
+
+            if (rp1_f is not None and rp2_f is not None and abs(rp1_f - rp2_f) > price_tolerance) or \
+               (rp1_f is None and rp2_f is not None) or (rp1_f is not None and rp2_f is None):
+                diff_details.append(f"Regular Price: F1=${regular_price1 if regular_price1 is not None else 'N/A'} vs F2=${regular_price2 if regular_price2 is not None else 'N/A'}")
+
+            # Use the correctly scoped size_final values for comparison
+            if size1_final_for_item1 != _p2_size_final_for_report:
+                diff_details.append(f"Size: F1='{size1_final_for_item1 or 'N/A'}' vs F2='{_p2_size_final_for_report or 'N/A'}'")
+
+            base_report_item = {
+                "P1_Brand": item1.get("product_brand"), "P1_Name_Core": item1.get("product_name_core"),
+                "P1_Variant": item1.get("product_variant_description"), 
+                "P1_Size_Orig": item1.get("size_quantity_info"),
+                "P1_Size_Norm": item1.get("size_quantity_info_normalized", size1_final_for_item1), 
+                "P1_Parsed_Size_Details": json.dumps(item1.get("parsed_size_details")) if item1.get("parsed_size_details") else None, 
+                "P1_Offer_Price": offer_price1, "P1_Regular_Price": regular_price1,
+                "P1_Unit_Indicator": item1.get("unit_indicator"), "P1_Store_Terms": item1.get("store_specific_terms"),
+                "P1_Val_Flags": "; ".join(item1.get("validation_flags", [])), 
+                "P1_Vision_Reprocessed": item1.get("reprocessed_by_vision_llm", False),
+                "P1_Box_ID": item1_id_log,
+                "P2_Brand": best_match_item2.get("product_brand"), "P2_Name_Core": best_match_item2.get("product_name_core"),
+                "P2_Variant": best_match_item2.get("product_variant_description"), 
+                "P2_Size_Orig": best_match_item2.get("size_quantity_info"),
+                "P2_Size_Norm": best_match_item2.get("size_quantity_info_normalized", _p2_size_final_for_report), # Use corrected fallback
+                "P2_Parsed_Size_Details": json.dumps(best_match_item2.get("parsed_size_details")) if best_match_item2.get("parsed_size_details") else None,
+                "P2_Offer_Price": offer_price2, "P2_Regular_Price": regular_price2,
+                "P2_Unit_Indicator": best_match_item2.get("unit_indicator"), "P2_Store_Terms": best_match_item2.get("store_specific_terms"),
+                "P2_Val_Flags": "; ".join(best_match_item2.get("validation_flags", [])), 
+                "P2_Vision_Reprocessed": best_match_item2.get("reprocessed_by_vision_llm", False),
+                "P2_Box_ID": best_match_item2_id_log,
+                "Similarity_Percent": round(highest_similarity, 1),
+            }
+            
+            if diff_details:
+                comparison_report.append({"Comparison_Type": "Product Match - Attribute Mismatch", **base_report_item, "Differences": "; ".join(diff_details)})
+            else:
+                comparison_report.append({"Comparison_Type": "Product Match - Attributes OK", **base_report_item, "Differences": ""})
+        else: # No match found for item1
+            logger.info(f"COMPARE_FN - No match found for {item1_id_log} (Highest sim on this item1 after all item2 checks: {highest_similarity:.1f}%)")
+            comparison_report.append({
+                "Comparison_Type": "Unmatched Product in File 1",
+                "P1_Brand": item1.get("product_brand"), "P1_Name_Core": item1.get("product_name_core"),
+                "P1_Variant": item1.get("product_variant_description"), "P1_Size_Orig": item1.get("size_quantity_info"),
+                "P1_Size_Norm": item1.get("size_quantity_info_normalized", size1_final_for_item1), # Use correctly scoped size1_final
+                "P1_Parsed_Size_Details": json.dumps(item1.get("parsed_size_details")) if item1.get("parsed_size_details") else None,
+                "P1_Offer_Price": item1.get("offer_price"), "P1_Regular_Price": item1.get("regular_price"),
+                "P1_Unit_Indicator": item1.get("unit_indicator"), "P1_Store_Terms": item1.get("store_specific_terms"),
+                "P1_Val_Flags": "; ".join(item1.get("validation_flags", [])),
+                "P1_Vision_Reprocessed": item1.get("reprocessed_by_vision_llm", False),
+                "P1_Box_ID": item1_id_log,
+            })
+    
+    # Loop for items in product_items2 not matched with any item from product_items1
+    for idx2, item2 in enumerate(product_items2):
+        if idx2 not in matched_item2_indices:
+            item2_id_log = item2.get("product_box_id", f"File2-Item{idx2}")
+            
+            # Correctly calculate size2_final for this unmatched item2
+            _unmatched_p2_size_details = item2.get("parsed_size_details", {})
+            _unmatched_p2_size_str_norm = str(item2.get("size_quantity_info_normalized", item2.get("size_quantity_info", "")) or "").lower().strip()
+            _unmatched_p2_size_from_details = ""
+            if _unmatched_p2_size_details:
+                if "value" in _unmatched_p2_size_details and "unit" in _unmatched_p2_size_details: _unmatched_p2_size_from_details = f"{_unmatched_p2_size_details['value']} {_unmatched_p2_size_details['unit']}"
+                elif "value_min" in _unmatched_p2_size_details and "value_max" in _unmatched_p2_size_details and "unit" in _unmatched_p2_size_details: _unmatched_p2_size_from_details = f"{_unmatched_p2_size_details['value_min']}-{_unmatched_p2_size_details['value_max']} {_unmatched_p2_size_details['unit']}"
+                elif "value_base" in _unmatched_p2_size_details and "value_equivalent" in _unmatched_p2_size_details and "unit" in _unmatched_p2_size_details: _unmatched_p2_size_from_details = f"{_unmatched_p2_size_details['value_base']}={_unmatched_p2_size_details['value_equivalent']} {_unmatched_p2_size_details['unit']}"
+            _unmatched_p2_size_final_for_report = (_unmatched_p2_size_from_details if _unmatched_p2_size_from_details else _unmatched_p2_size_str_norm).lower().strip()
+
+            logger.info(f"COMPARE_FN - Unmatched product in File 2 (Extra): {item2_id_log}")
+            comparison_report.append({
+                "Comparison_Type": "Unmatched Product in File 2 (Extra)",
+                "P2_Brand": item2.get("product_brand"), "P2_Name_Core": item2.get("product_name_core"),
+                "P2_Variant": item2.get("product_variant_description"), 
+                "P2_Size_Orig": item2.get("size_quantity_info"),
+                "P2_Size_Norm": item2.get("size_quantity_info_normalized", _unmatched_p2_size_final_for_report), # Use correctly scoped fallback
+                "P2_Parsed_Size_Details": json.dumps(item2.get("parsed_size_details")) if item2.get("parsed_size_details") else None,
+                "P2_Offer_Price": item2.get("offer_price"), "P2_Regular_Price": item2.get("regular_price"),
+                "P2_Unit_Indicator": item2.get("unit_indicator"), "P2_Store_Terms": item2.get("store_specific_terms"),
+                "P2_Val_Flags": "; ".join(item2.get("validation_flags", [])),
+                "P2_Vision_Reprocessed": item2.get("reprocessed_by_vision_llm", False),
+                "P2_Box_ID": item2_id_log,
+            })
+            
+    logger.info(f"COMPARE_FN - Comparison finished. Report items: {len(comparison_report)}")
+    return comparison_report
+
+# backend_processor.py
+
+# ... (existing functions) ...
+
+def draw_highlights_on_full_page_v2(full_page_pil_image: Image.Image,
+                                      all_items_on_this_page: list,
+                                      page_comparison_report_items: list,
+                                      file_type: str) -> BytesIO:
+    """
+    Draws highlights (borders around Roboflow boxes) on a full PIL page image.
+    - Unmatched items get one border color.
+    - Matched items with attribute mismatches get another border color.
+    """
+    draw = ImageDraw.Draw(full_page_pil_image)
+    img_width, img_height = full_page_pil_image.size
+
+    # Define colors
+    # For File 1 (typically displayed on the left)
+    COLOR_MISMATCH_FILE1 = (255, 0, 0)      # Red: Matched item in File 1, but has attribute differences
+    COLOR_UNMATCHED_FILE1 = (255, 165, 0)   # Orange: Item present in File 1, but unmatched in File 2
+
+    # For File 2 (typically displayed on the right)
+    COLOR_MISMATCH_FILE2 = (0, 128, 0)      # Green: Matched item in File 2, but has attribute differences
+    COLOR_UNMATCHED_FILE2 = (0, 0, 255)     # Blue: Item present in File 2, but unmatched in File 1 (extra in File 2)
+
+    # Determine current context colors
+    current_mismatch_color = COLOR_MISMATCH_FILE1 if file_type == "file1" else COLOR_MISMATCH_FILE2
+    current_unmatched_color = COLOR_UNMATCHED_FILE1 if file_type == "file1" else COLOR_UNMATCHED_FILE2
+    
+    OUTLINE_WIDTH = max(2, int(min(img_width, img_height) * 0.005)) # Slightly thicker for Roboflow boxes
+
+    logger.debug(f"DRAW_FULL_PAGE_V2 ({file_type}): Processing {len(all_items_on_this_page)} items for page. Report items for this page: {len(page_comparison_report_items)}")
+
+    for item_data in all_items_on_this_page:
+        item_product_box_id = item_data.get("product_box_id")
+        if not item_product_box_id:
+            logger.warning(f"DRAW_FULL_PAGE_V2 ({file_type}): Item data missing product_box_id. Skipping highlight for this item.")
+            continue
+
+        relevant_report_entry = None
+        for r_entry in page_comparison_report_items:
+            # Check if the current item (from all_items_on_this_page) corresponds to P1 or P2 in the report entry
+            if (file_type == "file1" and r_entry.get("P1_Box_ID") == item_product_box_id) or \
+               (file_type == "file2" and r_entry.get("P2_Box_ID") == item_product_box_id):
+                relevant_report_entry = r_entry
+                break
+        
+        if not relevant_report_entry:
+            # This item was found on the page but is not in the filtered comparison report for this page.
+            # This implies it was a "Product Match - Attributes OK" or otherwise not flagged for highlighting.
+            logger.debug(f"DRAW_FULL_PAGE_V2 ({file_type}): No relevant (highlightable) report entry for {item_product_box_id}. Assuming perfect match or no action needed.")
+            continue
+
+        comparison_type = relevant_report_entry.get("Comparison_Type", "")
+        differences_text = relevant_report_entry.get("Differences", "") # String of differences
+        
+        outline_color_to_use = None
+        action_description = "None"
+
+        # Determine if the item (in its current file context) is unmatched or mismatched
+        if file_type == "file1":
+            if comparison_type == "Unmatched Product in File 1" or \
+               comparison_type == "Unmatchable Product in File 1 (No Text)":
+                outline_color_to_use = current_unmatched_color # Orange
+                action_description = "Unmatched in File 1"
+            elif comparison_type == "Product Match - Attribute Mismatch" and bool(differences_text):
+                outline_color_to_use = current_mismatch_color # Red
+                action_description = "Attribute Mismatch in File 1 item"
+        elif file_type == "file2":
+            if comparison_type == "Unmatched Product in File 2 (Extra)":
+                outline_color_to_use = current_unmatched_color # Blue
+                action_description = "Unmatched in File 2 (Extra)"
+            elif comparison_type == "Product Match - Attribute Mismatch" and bool(differences_text):
+                # This condition implies that the item from file2 (item_product_box_id)
+                # was part of a matched pair that had differences.
+                outline_color_to_use = current_mismatch_color # Green
+                action_description = "Attribute Mismatch in File 2 item"
+        
+        if outline_color_to_use and item_data.get("roboflow_box_coords_pixels_center_wh"):
+            rf_box_coords = item_data["roboflow_box_coords_pixels_center_wh"]
+            cx_px, cy_px = rf_box_coords['x'], rf_box_coords['y']
+            w_px, h_px = rf_box_coords['width'], rf_box_coords['height']
+
+            x_min_px = int(cx_px - w_px / 2.0)
+            y_min_px = int(cy_px - h_px / 2.0)
+            x_max_px = int(cx_px + w_px / 2.0)
+            y_max_px = int(cy_px + h_px / 2.0)
+            
+            # Optional: Add a small padding around the box
+            # pad = 2 
+            # x_min_px, y_min_px = max(0, x_min_px - pad), max(0, y_min_px - pad)
+            # x_max_px, y_max_px = min(img_width - 1, x_max_px + pad), min(img_height - 1, y_max_px + pad)
+
+            if x_min_px < x_max_px and y_min_px < y_max_px: # Ensure valid box
+                draw.rectangle([(x_min_px, y_min_px), (x_max_px, y_max_px)],
+                               outline=outline_color_to_use, width=OUTLINE_WIDTH)
+                logger.debug(f"DRAW_FULL_PAGE_V2 ({file_type}): Drew Roboflow box for {item_product_box_id} ({action_description}) with color {outline_color_to_use}. Coords: ({x_min_px},{y_min_px})-({x_max_px},{y_max_px})")
+            else:
+                logger.warning(f"DRAW_FULL_PAGE_V2 ({file_type}): Invalid Roboflow box coordinates for {item_product_box_id} after calculation. Original: {rf_box_coords}")
+
+        elif outline_color_to_use: # Color was determined, but no Roboflow box coords
+            logger.warning(f"DRAW_FULL_PAGE_V2 ({file_type}): Item {item_product_box_id} was flagged for highlight ({action_description}) but 'roboflow_box_coords_pixels_center_wh' is missing.")
+
+    img_byte_arr = BytesIO()
+    full_page_pil_image.save(img_byte_arr, format='JPEG', quality=90)
+    img_byte_arr.seek(0)
+    return img_byte_arr
+
+
+# ... (rest of your backend_processor.py code) ...
+
+# --- Main Processing Function (callable by Streamlit) ---
+# backend_processor.py
+
+# ... (existing functions) ...
+
+# backend_processor.py
+
+# ... (existing functions) ...
+
+def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_name):
+    request_id = f"req_{int(time.time())}"
+    logger.info(f"REQUEST_ID: {request_id} - Backend processing started for '{file1_name}' and '{file2_name}'")
+
+    all_files_data_for_reprocessing_and_pils = []
+    temp_pdf_paths_to_cleanup = []
+    final_product_items_file1 = []
+    final_product_items_file2 = []
+
+    try:
+        # Phase 1: Initial extraction for both files
+        for file_idx_num_zero_based, (file_bytes_content, original_filename) in enumerate(
+            [(file1_bytes, file1_name), (file2_bytes, file2_name)]
+        ):
+            file_id_log_prefix = f"{request_id}-File{file_idx_num_zero_based+1}"
+            s3_safe_filename_part = secure_filename(original_filename)
+            logger.info(f"{file_id_log_prefix} - Processing file: {original_filename} (S3 safe: {s3_safe_filename_part})")
+
+            current_file_initial_items = []
+            page_pil_images_for_file = []
+            s3_upload_timestamp = time.time()
+
+            # ... (PDF/image loading remains the same) ...
+            if original_filename.lower().endswith(".pdf"):
+                fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf", prefix=f"{request_id}_")
+                os.close(fd)
+                temp_pdf_paths_to_cleanup.append(temp_pdf_path)
+                with open(temp_pdf_path, "wb") as f_pdf:
+                    f_pdf.write(file_bytes_content)
+                try:
+                    logger.info(f"{file_id_log_prefix} - Converting PDF to images (DPI 200) from {temp_pdf_path}...")
+                    logger.info(f"{file_id_log_prefix} - Using POPPLER_BIN_PATH: {POPPLER_BIN_PATH}")
+                    page_pil_images_for_file = convert_from_path(temp_pdf_path, dpi=200, poppler_path=POPPLER_BIN_PATH, fmt='jpeg', timeout=300)
+                    logger.info(f"{file_id_log_prefix} - PDF converted to {len(page_pil_images_for_file)} images.")
+                except Exception as e_pdf:
+                    logger.error(f"{file_id_log_prefix} - PDF conversion error for {original_filename}: {e_pdf}", exc_info=True)
+                    raise
+            elif original_filename.lower().endswith((".png", ".jpg", ".jpeg")):
+                try:
+                    page_pil_images_for_file = [Image.open(BytesIO(file_bytes_content))]
+                    logger.info(f"{file_id_log_prefix} - Image file loaded.")
+                except Exception as e_img:
+                    logger.error(f"{file_id_log_prefix} - Invalid image file {original_filename}: {str(e_img)}", exc_info=True)
+                    raise
+            else:
+                err_msg = f"Unsupported file type for {original_filename}"
+                logger.error(f"{file_id_log_prefix} - {err_msg}")
+                raise ValueError(err_msg)
+
+
+            s3_keys_for_this_file = []
+            for page_idx, page_image_pil in enumerate(page_pil_images_for_file):
+                page_id_log = f"{file_id_log_prefix}-Page{page_idx}"
+                logger.info(f"{page_id_log} - Starting initial processing pass for page {page_idx} of {original_filename}...")
+                image_width_px, image_height_px = page_image_pil.size
+                logger.debug(f"{page_id_log} - Image dimensions: {image_width_px}x{image_height_px}")
+
+                if not roboflow_model_object:
+                    logger.warning(f"{page_id_log} - Roboflow model not available. Product box detection will be skipped.")
+                    roboflow_preds = []
+                else:
+                    roboflow_preds = get_roboflow_predictions_sdk(page_image_pil, f"{s3_safe_filename_part}_p{page_idx}")
+                
+                if not roboflow_preds:
+                    logger.warning(f"{page_id_log} - No Roboflow predictions or Roboflow failed. Skipping text collation for this page.")
+                
+                if not s3_client or not textract_client or not S3_BUCKET_NAME:
+                    logger.error(f"{page_id_log} - S3/Textract clients or bucket not configured. Cannot process with Textract.")
+                    raise ConnectionError("S3/Textract not configured for backend processing.")
+
+                img_byte_arr_s3 = BytesIO()
+                page_image_pil.save(img_byte_arr_s3, format='JPEG', quality=90)
+                img_byte_arr_s3.seek(0)
+                s3_page_key = f"pages/{request_id}_{s3_upload_timestamp}_{file_idx_num_zero_based}_p{page_idx}_{s3_safe_filename_part}.jpg"
+                
+                uploaded_s3_key = upload_to_s3(img_byte_arr_s3, S3_BUCKET_NAME, s3_page_key)
+                if not uploaded_s3_key:
+                    logger.error(f"{page_id_log} - Failed to upload page image to S3. Skipping page.")
+                    continue
+                s3_keys_for_this_file.append(uploaded_s3_key)
+
+                logger.info(f"{page_id_log} - Starting Textract analysis for S3 key: {uploaded_s3_key}")
+                textract_blocks = get_analysis_from_document_via_textract(S3_BUCKET_NAME, uploaded_s3_key)
+                if not textract_blocks:
+                    logger.error(f"{page_id_log} - Textract analysis failed or returned no blocks. Skipping page.")
+                    delete_from_s3(S3_BUCKET_NAME, uploaded_s3_key)
+                    continue
+                logger.info(f"{page_id_log} - Textract returned {len(textract_blocks)} blocks.")
+                blocks_map = {b['Id']: b for b in textract_blocks}
+
+                collated_snippets = []
+                if roboflow_preds:
+                    logger.info(f"{page_id_log} - Collating text for {len(roboflow_preds)} Roboflow boxes...")
+                    collated_snippets = collate_text_for_product_boxes(roboflow_preds, textract_blocks, blocks_map, image_width_px, image_height_px, page_id_for_log=page_id_log)
+                else:
+                    logger.warning(f"{page_id_log} - No Roboflow predictions, so no snippets to collate text for.")
+
+                for snippet_idx, snippet in enumerate(collated_snippets):
+                    item_id_for_log = snippet.get("product_box_id", f"{page_id_log}-Snip{snippet_idx}")
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Processing snippet with Text LLM...")
+                    
+                    # Pass textract_blocks_in_segment to the text LLM function
+                    llm_output = extract_product_data_with_llm(
+                        snippet["collated_text"], 
+                        item_id_for_log=item_id_for_log, 
+                        textract_blocks_in_segment=snippet.get("textract_blocks_in_segment") # NEW: Pass this
+                    )
+                    
+                    price_candidates_for_snippet = snippet.get("price_candidates", [])
+                    
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Post-processing and validating Text LLM output...")
+                    processed_item = post_process_and_validate_item_data(llm_output, price_candidates_for_snippet, snippet["collated_text"], item_id_for_log=item_id_for_log)
+                    
+                    # Also carry over the Textract bbox fields from llm_output to processed_item
+                    for key in llm_output.keys():
+                        if key.endswith('_bbox') and key not in processed_item:
+                            processed_item[key] = llm_output[key]
+
+                    current_file_initial_items.append({
+                        "product_box_id": item_id_for_log,
+                        "original_filename": original_filename,
+                        "page_idx_for_reprocessing": page_idx,
+                        "roboflow_box_coords_pixels_center_wh": snippet.get("roboflow_box_coords_pixels_center_wh"),
+                        "initial_price_candidates": price_candidates_for_snippet,
+                        "original_collated_text": snippet.get("collated_text"),
+                        "roboflow_class_name": snippet.get("class_name", "UnknownClass"),
+                        "textract_blocks_in_segment": snippet.get("textract_blocks_in_segment"), # Also pass this for vision LLM if needed later
+                        **processed_item # Unpack processed_item (includes all LLM data + validation flags + new _bbox fields)
+                    })
+                    logger.info(f"ITEM_ID: {item_id_for_log} - Initial processing complete. Offer: {processed_item.get('offer_price')}, Regular: {processed_item.get('regular_price')}")
+            # End of page loop
+
+            for s3_key_to_delete in s3_keys_for_this_file:
+                delete_from_s3(S3_BUCKET_NAME, s3_key_to_delete)
+            
+            all_files_data_for_reprocessing_and_pils.append({
+                "file_id_log_prefix": file_id_log_prefix,
+                "filename": original_filename,
+                "page_pils_list": page_pil_images_for_file,
+                "items": current_file_initial_items
+            })
+        # End of file loop (file1, file2)
+
+        logger.info(f"REQUEST_ID: {request_id} - Initial processing pass complete for all files.")
+        logger.info(f"REQUEST_ID: {request_id} - Starting Vision LLM re-processing stage for flagged items...")
+
+        # Phase 2: Vision LLM re-processing for flagged items
+        for file_idx, file_data_obj in enumerate(all_files_data_for_reprocessing_and_pils):
+            current_file_final_items_for_vision_pass = []
+            file_log_prefix_vision = file_data_obj["file_id_log_prefix"]
+            logger.info(f"{file_log_prefix_vision} - Vision re-processing items from: {file_data_obj['filename']}")
+            
+            for item_idx, item_to_evaluate_original in enumerate(file_data_obj["items"]):
+                item_being_processed = item_to_evaluate_original.copy()
+                item_id_for_log_vision = item_being_processed.get("product_box_id", f"{file_log_prefix_vision}-Item{item_idx}-VisionEval")
+
+                item_being_processed.setdefault('validation_flags', [])
+                item_being_processed.setdefault('reprocessed_by_vision_llm', False)
+
+                # --- Decision logic for sending to Vision LLM (remains the same) ---
+                send_to_vision = False
+                vision_reason = "No specific trigger"
+
+                flags = item_being_processed.get("validation_flags", [])
+                offer_price = item_being_processed.get("offer_price")
+                original_text = item_being_processed.get("original_collated_text", "")
+                roboflow_class = item_being_processed.get("roboflow_class_name", "UnknownClass")
+                price_candidates_for_current_item = item_being_processed.get("initial_price_candidates", [])
+                
+                current_item_best_offer_candidate = None
+                if price_candidates_for_current_item:
+                    valid_price_cands_vision = [pc for pc in price_candidates_for_current_item if pc.get('parsed_value') is not None and pc.get('parsed_value') >= 0]
+                    offer_cands_vision = sorted([pc for pc in valid_price_cands_vision if not pc.get('is_regular_candidate', False)], key=lambda c: (c.get('source_block_id') == 'GEOMETRIC_MERGE', -c.get('pixel_height', 0)))
+                    if offer_cands_vision: current_item_best_offer_candidate = offer_cands_vision[0]
+
+                critical_price_error_patterns = [
+                    "XYZ->0.XY error", "price seems too low, corrected to prominent candidate",
+                    "Correcting LLM offer price", "Correcting LLM regular price",
+                    "Multi-buy pattern.*failed", "differs from prominent visual candidate",
+                    "Offer price .* populated from visually prominent candidate", 
+                    "Regular price .* populated from visual candidate"
+                ]
+                critical_price_error_flag_found = any(any(re.search(pattern, flag, re.IGNORECASE) for pattern in critical_price_error_patterns) for flag in flags)
+                
+                price_suspiciously_low_text_pipeline = False
+                if offer_price is not None:
+                    try: price_suspiciously_low_text_pipeline = (0.01 <= float(offer_price) < 1.00)
+                    except (ValueError, TypeError): pass
+                
+                potential_X_YZ_in_text = re.search(r'\b([1-9])\s*(\d{2})\b', original_text) or \
+                                         re.search(r'\b([1-9]\d{2})\b', original_text) 
+
+                if item_being_processed.get("error_message"):
+                    send_to_vision = True; vision_reason = f"Text LLM error: {item_being_processed.get('error_message')}"
+                elif critical_price_error_flag_found:
+                    send_to_vision = True; vision_reason = f"Critical price error flags found: {flags}"
+                elif price_suspiciously_low_text_pipeline and potential_X_YZ_in_text and not any(kw in original_text.lower() for kw in ["limit", "max"]):
+                    send_to_vision = True; vision_reason = f"Suspiciously low price ${offer_price} from text pipeline, but original text has pattern '{potential_X_YZ_in_text.group(0) if potential_X_YZ_in_text else 'N/A'}'"
+                elif offer_price is None and roboflow_class and roboflow_class.lower() == "product_item": 
+                    send_to_vision = True; vision_reason = f"Null offer price from text pipeline for a Roboflow '{roboflow_class}' item."
+                elif item_being_processed.get("product_name_core") is None and offer_price is not None: 
+                    send_to_vision = True; vision_reason = "Product has price but no name from Text LLM."
+                elif offer_price is not None and current_item_best_offer_candidate and \
+                             current_item_best_offer_candidate.get('parsed_value') is not None and \
+                             abs(float(offer_price) - float(current_item_best_offer_candidate.get('parsed_value', 0))) > 1.50 : 
+                    send_to_vision = True; vision_reason = f"Large price discrepancy (>${1.50}) between Text LLM price ${offer_price} and visual candidate ${current_item_best_offer_candidate.get('parsed_value')}"
+                
+                if not send_to_vision and offer_price is not None: 
+                    try:
+                        offer_price_float = float(offer_price)
+                        if 0.01 <= offer_price_float < 1.00: 
+                            cents_part_str = str(int(round((offer_price_float * 100) % 100))).zfill(2)
+                            if re.search(r'\b' + re.escape(cents_part_str), original_text): 
+                                has_stronger_visual_candidate_for_missing_dollar = False
+                                if price_candidates_for_current_item:
+                                    for pc_cand_vision_trigger in price_candidates_for_current_item:
+                                        pc_text_vt = pc_cand_vision_trigger.get('text_content','').strip()
+                                        if re.fullmatch(r'[1-9]\s*\d{2}', pc_text_vt) or re.fullmatch(r'[1-9]\d{2}', pc_text_vt):
+                                            parsed_strong_cand_vt = parse_price_string(pc_text_vt, item_id_for_log_vision + "-strongcandVT")
+                                            if parsed_strong_cand_vt and parsed_strong_cand_vt >= 1.00:
+                                                has_stronger_visual_candidate_for_missing_dollar = True
+                                                logger.debug(f"ITEM_ID: {item_id_for_log_vision} - AGGRESSIVE Vision Trigger Check: Found stronger visual candidate '{pc_text_vt}' ({parsed_strong_cand_vt}) for low price {offer_price}")
+                                                break
+                                
+                                if has_stronger_visual_candidate_for_missing_dollar or not any(kw in original_text.lower() for kw in ["limit", "coupon", "max", "por solo", "a solo", "menos de", "oferta", "esp."]):
+                                    send_to_vision = True
+                                    vision_reason = f"AGGRESSIVE: Suspiciously low offer price ${offer_price} (cents '{cents_part_str}' found in text). Potential missing dollar. Stronger visual candidate: {has_stronger_visual_candidate_for_missing_dollar}"
+                                    logger.info(f"ITEM_ID: {item_id_for_log_vision} - AGGRESSIVE VISION TRIGGER activated: {vision_reason}")
+                    except (ValueError, TypeError) as e_agg_vision:
+                        logger.warning(f"ITEM_ID: {item_id_for_log_vision} - Error during aggressive vision trigger check for offer_price {offer_price}: {e_agg_vision}")
+                # --- End decision logic for sending to Vision LLM ---
+
+
+                if send_to_vision and item_being_processed.get("roboflow_box_coords_pixels_center_wh"):
+                    logger.info(f"ITEM_ID: {item_id_for_log_vision} - Sending to Vision LLM. Reason: {vision_reason}. Initial Flags: {item_being_processed.get('validation_flags')}")
+                    page_idx_reproc = item_being_processed["page_idx_for_reprocessing"]
+                    
+                    if page_idx_reproc < len(file_data_obj["page_pils_list"]):
+                        page_image_pil_reproc = file_data_obj["page_pils_list"][page_idx_reproc]
+                        segment_bytes = get_segment_image_bytes(page_image_pil_reproc, item_being_processed["roboflow_box_coords_pixels_center_wh"], item_id_for_log=item_id_for_log_vision)
+
+                        if segment_bytes:
+                            name_hint_vision = item_being_processed.get("product_name_core") or item_being_processed.get("product_brand")
+                            # NO LONGER ASKING FOR BBOXES FROM VISION LLM
+                            vision_llm_output = re_extract_with_vision_llm(segment_bytes, item_id_for_log=item_id_for_log_vision, original_item_name=name_hint_vision)
+                            
+                            item_being_processed['reprocessed_by_vision_llm'] = True
+
+                            if "error_message" not in vision_llm_output:
+                                parsed_op_v = parse_price_string(vision_llm_output.get("offer_price"), item_id_for_log=f"{item_id_for_log_vision}-vision_offer")
+                                parsed_rp_v = parse_price_string(vision_llm_output.get("regular_price"), item_id_for_log=f"{item_id_for_log_vision}-vision_regular")
+                                
+                                vision_llm_output["offer_price"] = parsed_op_v
+                                vision_llm_output["regular_price"] = parsed_rp_v
+                                
+                                vision_item_processed = post_process_and_validate_item_data(vision_llm_output, [], "", item_id_for_log=f"{item_id_for_log_vision}-vision_processed")
+                                
+                                # Update item_being_processed with fields from vision_item_processed
+                                fields_to_update = ["offer_price", "regular_price", "product_brand", "product_name_core", 
+                                                    "product_variant_description", "size_quantity_info", "unit_indicator", 
+                                                    "store_specific_terms", "parsed_size_details", "size_quantity_info_normalized"]
+                                
+                                for key_update in fields_to_update:
+                                    if key_update in vision_item_processed and vision_item_processed[key_update] is not None: 
+                                        item_being_processed[key_update] = vision_item_processed[key_update]
+                                # IMPORTANT: NO _bbox update here from vision_llm_output
+                                # Bboxes should remain from Textract lookup in text LLM
+                                        
+                                item_being_processed['validation_flags'].extend(vision_item_processed.get('validation_flags',[]))
+                                item_being_processed['validation_flags'] = list(set(item_being_processed['validation_flags']))
+                                item_being_processed['validation_flags'].append(f"Successfully reprocessed by Vision LLM (Reason: {vision_reason})")
+                                
+                            else:
+                                logger.warning(f"ITEM_ID: {item_id_for_log_vision} - Vision LLM re-extraction error: {vision_llm_output.get('error_message')}. Keeping pre-vision data.")
+                                item_being_processed["validation_flags"].append(f"Vision LLM failed: {vision_llm_output.get('error_message')}")
+                        else:
+                            logger.warning(f"ITEM_ID: {item_id_for_log_vision} - Could not get segment image for Vision LLM. Keeping pre-vision data.")
+                            item_being_processed["validation_flags"].append("Vision LLM skipped: Could not create segment image.")
+                            item_being_processed['reprocessed_by_vision_llm'] = True
+                    else:
+                        logger.error(f"ITEM_ID: {item_id_for_log_vision} - page_idx_for_reprocessing {page_idx_reproc} is out of bounds for page_pils_list (len {len(file_data_obj['page_pils_list'])}).")
+                        item_being_processed["validation_flags"].append("Vision LLM skipped: Page index error.")
+                        item_being_processed['reprocessed_by_vision_llm'] = True
+                else:
+                    if not item_being_processed.get("roboflow_box_coords_pixels_center_wh") and send_to_vision :
+                         item_being_processed["validation_flags"].append("Vision LLM trigger met but skipped: Missing Roboflow box coordinates.")
+                    
+                current_file_final_items_for_vision_pass.append(item_being_processed) 
+            
+            if file_idx == 0:
+                final_product_items_file1 = current_file_final_items_for_vision_pass
+            else:
+                final_product_items_file2 = current_file_final_items_for_vision_pass
+                logger.info(f"REQUEST_ID: {request_id} - Assigned {len(final_product_items_file2)} items to final_product_items_file2")
+        # End of Vision LLM reprocessing loop
+
+        logger.info(f"REQUEST_ID: {request_id} - Vision LLM re-processing stage complete.")
+        logger.info(f"REQUEST_ID: {request_id} - Final items for File 1 ({len(final_product_items_file1)}):")
+        # ... (logging remains the same) ...
+
+        logger.info(f"REQUEST_ID: {request_id} - Starting final product comparison.")
+        product_centric_comparison_report = compare_product_items(final_product_items_file1, final_product_items_file2)
+
+        # --- Phase 3: Generate Full Highlighted Pages ---
+        highlighted_full_pages_base64_file1 = []
+        highlighted_full_pages_base64_file2 = []
+
+        # Get page data from all_files_data_for_reprocessing_and_pils
+        file1_page_data = next(f for f in all_files_data_for_reprocessing_and_pils if f["file_id_log_prefix"].endswith("-File1"))
+        file2_page_data = next(f for f in all_files_data_for_reprocessing_and_pils if f["file_id_log_prefix"].endswith("-File2"))
+
+        num_pages_file1 = len(file1_page_data["page_pils_list"])
+        num_pages_file2 = len(file2_page_data["page_pils_list"])
+        
+        # Iterate through pages (assuming same number of pages or handle misalignment)
+        max_pages = max(num_pages_file1, num_pages_file2)
+
+        for page_idx in range(max_pages):
+            page_pil_file1 = file1_page_data["page_pils_list"][page_idx] if page_idx < num_pages_file1 else None
+            page_pil_file2 = file2_page_data["page_pils_list"][page_idx] if page_idx < num_pages_file2 else None
+
+            # Filter items for current page
+            items_on_current_page_file1 = [item for item in final_product_items_file1 if item["page_idx_for_reprocessing"] == page_idx]
+            items_on_current_page_file2 = [item for item in final_product_items_file2 if item["page_idx_for_reprocessing"] == page_idx]
+            
+            # Filter comparison report for items on current page
+            # This part requires careful filtering of `product_centric_comparison_report`
+            # to identify which items on *this specific page* had differences or were unmatched.
+            # You'll likely need to pass the `product_box_id` from items_on_current_page_file1/2
+            # and match them against the 'P1_Box_ID'/'P2_Box_ID' in the report.
+
+            # Example logic for getting differences for a specific item on a page:
+            page_comparison_report_items = []
+            for report_item in product_centric_comparison_report:
+                p1_box_id_in_report = report_item.get("P1_Box_ID")
+                p2_box_id_in_report = report_item.get("P2_Box_ID")
+                
+                # Check if this report item involves an item from the current page
+                if any(item['product_box_id'] == p1_box_id_in_report for item in items_on_current_page_file1) or \
+                any(item['product_box_id'] == p2_box_id_in_report for item in items_on_current_page_file2):
+                    page_comparison_report_items.append(report_item)
+
+
+            if page_pil_file1:
+                # Create a copy to draw on, so original PIL list is not modified
+                page_pil_file1_copy = page_pil_file1.copy() 
+                # Call the drawing function (updated to draw on full page)
+                # This function needs to iterate through `items_on_current_page_file1` and `page_comparison_report_items`
+                # to decide what to highlight and with what color.
+                highlighted_img_bytes_file1 = draw_highlights_on_full_page_v2(
+                    page_pil_file1_copy,
+                    items_on_current_page_file1,
+                    page_comparison_report_items,
+                    "file1"
+                )
+                highlighted_full_pages_base64_file1.append(base64.b64encode(highlighted_img_bytes_file1.getvalue()).decode('utf-8'))
+
+            if page_pil_file2:
+                page_pil_file2_copy = page_pil_file2.copy()
+                highlighted_img_bytes_file2 = draw_highlights_on_full_page_v2(
+                    page_pil_file2_copy,
+                    items_on_current_page_file2,
+                    page_comparison_report_items,
+                    "file2"
+                )
+                highlighted_full_pages_base64_file2.append(base64.b64encode(highlighted_img_bytes_file2.getvalue()).decode('utf-8'))
+
+        final_response_dict = {
+            # ... (other existing fields) ...
+            "highlighted_pages_file1": highlighted_full_pages_base64_file1,
+            "highlighted_pages_file2": highlighted_full_pages_base64_file2,
+        }
+        return final_response_dict
+        
+        # --- NEW: Generate highlighted images for comparison report entries ---
+        for report_item in product_centric_comparison_report:
+            comparison_type = report_item.get("Comparison_Type")
+            p1_box_id = report_item.get("P1_Box_ID")
+            p2_box_id = report_item.get("P2_Box_ID")
+            
+            p1_item = next((item for item in final_product_items_file1 if item.get("product_box_id") == p1_box_id), None)
+            p2_item = next((item for item in final_product_items_file2 if item.get("product_box_id") == p2_box_id), None)
+
+            # Get differences list safely
+            differences_list = report_item.get("Differences", "").split('; ')
+            differences_list = [d.strip() for d in differences_list if d.strip()] # Filter out empty strings
+            
+            should_draw_highlights = bool(differences_list) or \
+                                     (comparison_type == "Unmatched Product in File 1") or \
+                                     (comparison_type == "Unmatched Product in File 2 (Extra)")
+
+            if should_draw_highlights:
+                # File 1 highlighting
+                if p1_item and p1_item.get("roboflow_box_coords_pixels_center_wh"):
+                    page_idx_p1 = p1_item["page_idx_for_reprocessing"]
+                    file1_data_obj = next((f for f in all_files_data_for_reprocessing_and_pils if f["file_id_log_prefix"] == f"{request_id}-File1"), None)
+                    if file1_data_obj and page_idx_p1 < len(file1_data_obj["page_pils_list"]):
+                        original_page_pil_p1 = file1_data_obj["page_pils_list"][page_idx_p1]
+                        segment_image_bytes_p1 = get_segment_image_bytes(original_page_pil_p1, p1_item["roboflow_box_coords_pixels_center_wh"], item_id_for_log=p1_box_id)
+                        
+                        if segment_image_bytes_p1:
+                            segment_pil_p1 = Image.open(segment_image_bytes_p1)
+                            highlighted_segment_bytes_p1 = draw_highlights_on_image(
+                                segment_pil_p1, 
+                                p1_item, # p1_item now contains Textract bboxes
+                                differences_list,
+                                p1_item.get("product_name_core", p1_item.get("product_box_id", "Unknown Product")), 
+                                "file1"
+                            )
+                            report_item["P1_Highlighted_Image_Base64"] = base64.b64encode(highlighted_segment_bytes_p1.getvalue()).decode('utf-8')
+                            logger.debug(f"Generated highlighted image for P1: {p1_box_id}")
+                        else:
+                            logger.warning(f"Could not get segment image bytes for P1: {p1_box_id} for highlighting.")
+
+                # File 2 highlighting
+                if p2_item and p2_item.get("roboflow_box_coords_pixels_center_wh"):
+                    page_idx_p2 = p2_item["page_idx_for_reprocessing"]
+                    file2_data_obj = next((f for f in all_files_data_for_reprocessing_and_pils if f["file_id_log_prefix"] == f"{request_id}-File2"), None)
+                    if file2_data_obj and page_idx_p2 < len(file2_data_obj["page_pils_list"]):
+                        original_page_pil_p2 = file2_data_obj["page_pils_list"][page_idx_p2]
+                        segment_image_bytes_p2 = get_segment_image_bytes(original_page_pil_p2, p2_item["roboflow_box_coords_pixels_center_wh"], item_id_for_log=p2_box_id)
+
+                        if segment_image_bytes_p2:
+                            segment_pil_p2 = Image.open(segment_image_bytes_p2)
+                            highlighted_segment_bytes_p2 = draw_highlights_on_image(
+                                segment_pil_p2, 
+                                p2_item, # p2_item now contains Textract bboxes
+                                differences_list,
+                                p2_item.get("product_name_core", p2_item.get("product_box_id", "Unknown Product")), 
+                                "file2"
+                            )
+                            report_item["P2_Highlighted_Image_Base64"] = base64.b64encode(highlighted_segment_bytes_p2.getvalue()).decode('utf-8')
+                            logger.debug(f"Generated highlighted image for P2: {p2_box_id}")
+                        else:
+                            logger.warning(f"Could not get segment image bytes for P2: {p2_box_id} for highlighting.")
+            else:
+                logger.debug(f"Skipping image highlighting for {report_item.get('Comparison_Type')}: {report_item.get('P1_Name_Core', 'N/A')}/{report_item.get('P2_Name_Core', 'N/A')}. No differences or unmatchable type that needs highlight.")
+        # --- END NEW: Generate highlighted images ---
+
+        # ... (CSV generation and final return remain the same) ...
+        if product_centric_comparison_report:
+            report_df = pd.DataFrame(product_centric_comparison_report)
+        else:
+            report_df = pd.DataFrame([{"Comparison_Type": "No items to compare or no matches found."}])
+
+        csv_buffer = io.StringIO()
+        report_df.to_csv(csv_buffer, index=False, lineterminator='\r\n')
+        csv_data_string = csv_buffer.getvalue()
+
+        final_response_dict = {
+            "message": "Backend processing complete. Comparison performed.",
+            "product_items_file1_count": len(final_product_items_file1),
+            "product_items_file2_count": len(final_product_items_file2),
+            "product_comparison_details": product_centric_comparison_report,
+            "report_csv_data": csv_data_string,
+            "all_product_details_file1": final_product_items_file1,
+            "all_product_details_file2": final_product_items_file2
+        }
+        logger.info(f"REQUEST_ID: {request_id} - Backend processing finished successfully. Returning structured response.")
+        return final_response_dict
+
+    except Exception as e_global:
+        logger.error(f"REQUEST_ID: {request_id} - Global error in backend processing: {str(e_global)}", exc_info=True)
+        raise
+    finally:
+        for temp_path in temp_pdf_paths_to_cleanup:
             if os.path.exists(temp_path):
                 try:
-                    # Try to restore to original name if something went wrong
-                    original_path = os.path.join(folder_path, old_name)
-                    if not os.path.exists(original_path) and not os.path.exists(new_path):
-                        os.rename(temp_path, original_path)
-                        print(f"Cleanup: Restored {old_name}")
-                    else:
-                        os.unlink(temp_path)
-                        print(f"Cleanup: Removed temp file for {old_name}")
-                except Exception as cleanup_error:
-                    print(f"Cleanup error for {old_name}: {cleanup_error}")
-
-    print(f"Successfully renamed {successful_renames} images sequentially")
-
-def process_folders_with_image_templates(template1_path: str, template2_path: str, template3_path: str,
-                                         folder1_path: str, folder2_path: str,
-                                         similarity_threshold: float = 0.55,
-                                         comparison_method: str = "structural",
-                                         dry_run: bool = True):
-    """
-    Process two folders using image template matching to find and delete similar images,
-    then rename remaining images sequentially.
-
-    Args:
-        template1_path: Path to first template image
-        template2_path: Path to second template image
-        template3_path: Path to third template image
-        folder1_path: Path to first folder to process
-        folder2_path: Path to second folder to process
-        similarity_threshold: Minimum similarity score for match (0.0 to 1.0)
-        comparison_method: Method for comparison ("structural", "histogram", "template")
-        dry_run: If True, only show what would be done
-    """
-    template_paths = [template1_path, template2_path, template3_path]
-    folder_paths = [folder1_path, folder2_path]
-
-    print(f"Image Template Matching Process with Sequential Renaming")
-    print(f"Similarity threshold: {similarity_threshold}")
-    print(f"Comparison method: {comparison_method}")
-    print(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
-    print("-" * 60)
-
-    print("Template images:")
-    for i, template_path in enumerate(template_paths, 1):
-        print(f"  {i}. {template_path}")
-    print()
-
-    # Process each folder
-    for folder_idx, folder_path in enumerate(folder_paths, 1):
-        print(f"Processing Folder {folder_idx}: {folder_path}")
-        print("-" * 40)
-
-        # Get all images in folder before processing
-        image_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']
-        all_images = [f for f in os.listdir(folder_path)
-                      if any(f.lower().endswith(ext) for ext in image_extensions)]
-
-        print(f"Found {len(all_images)} images in folder")
-
-        # Find matching images using template matching
-        matching_images = find_matching_images_by_template(
-            template_paths, folder_path, similarity_threshold, comparison_method
-        )
-
-        if not matching_images:
-            print(f"No matching images found in folder {folder_idx}")
-            # Still rename sequentially even if no deletions
-            if not dry_run:
-                print("Renaming all images sequentially...")
-                rename_images_sequentially(folder_path, all_images)
-            else:
-                print("DRY RUN - Would rename all images sequentially")
-            print()
-            continue
-
-        print(f"\nFound {len(matching_images)} matching images to delete:")
-        for img in matching_images:
-            print(f"  - {img}")
-
-        # Calculate remaining images after deletion
-        remaining_images = [img for img in all_images if img not in matching_images]
-
-        if dry_run:
-            print(f"\nDRY RUN - Would perform the following:")
-            print(f"1. Delete {len(matching_images)} matching images")
-            print(f"2. Rename {len(remaining_images)} remaining images sequentially (1, 2, 3, ...)")
-            print(f"\nRemaining images after deletion would be:")
-            for i, img in enumerate(remaining_images, 1):
-                print(f"  {i}. {img}")
-        else:
-            # Delete matching images
-            deleted_count = 0
-            actually_deleted = []
-
-            for img in matching_images:
-                img_path = os.path.join(folder_path, img)
-                try:
-                    os.remove(img_path)
-                    deleted_count += 1
-                    actually_deleted.append(img)
-                    print(f"Deleted: {img}")
-                except Exception as e:
-                    print(f"Error deleting {img}: {e}")
-
-            # Get fresh list of current images from folder after deletions
-            current_images = [f for f in os.listdir(folder_path)
-                              if any(f.lower().endswith(ext) for ext in image_extensions)]
-
-            # Rename remaining images sequentially
-            if current_images:
-                rename_images_sequentially(folder_path, current_images)
-            else:
-                print("No images remaining after deletion")
-
-            print(f"Completed folder {folder_idx}: Deleted {deleted_count} images, renamed remaining sequentially")
-
-        print()
-
-    print("Processing complete!")
-
-# ========================================
-# SCRIPT 3: VLM Catalog Comparison
-# ========================================
-
-# ========================================
-# SCRIPT 3: VLM Catalog Comparison (FINAL, COMPLETE VERSION)
-# ========================================
-
-class PracticalCatalogComparator:
-    """
-    Practical VLM-based catalog comparison focused on what matters:
-    - Price differences
-    - Different products/brands
-    - Ignores minor text variations
-    """
-
-    def __init__(self, openai_api_key: str, vlm_model: str = "gpt-4o", price_tolerance: float = 0.01):
-        self.openai_client = openai.OpenAI(api_key=openai_api_key)
-        self.vlm_model = vlm_model
-        self.price_tolerance = price_tolerance
-        self.brand_corrections = {
-            'downy': 'Downy', 'gain': 'Gain', 'tide': 'Tide', 'glad': 'Glad',
-            'scott': 'Scott', 'raid': 'Raid', 'ace': 'Ace', 'purex': 'Purex',
-            'clorox': 'Clorox', 'bounty': 'Bounty', 'lysol': 'Lysol',
-            'palmolive': 'Palmolive', 'ajax': 'Ajax', 'dawn': 'Dawn',
-            'charmin': 'Charmin', 'kleenex': 'Kleenex', 'febreze': 'Febreze'
-        }
-        self.unit_normalizations = {
-            'onzas': 'oz', 'onza': 'oz', 'ozs': 'oz', 'ounces': 'oz',
-            'libras': 'lb', 'libra': 'lb', 'lbs': 'lb', 'pounds': 'lb',
-            'galones': 'gal', 'galon': 'gal', 'gallons': 'gal',
-            'litro': 'L', 'litros': 'L', 'lt': 'L', 'liter': 'L',
-            'mililitros': 'mL', 'ml': 'mL', 'milliliters': 'mL',
-            'gramos': 'g', 'gramo': 'g', 'grams': 'g',
-            'rollos': 'rolls', 'rollo': 'roll',
-            'ct': 'ct', 'count': 'ct', 'unidades': 'ct', 'piezas': 'ct'
-        }
-
-    # --- HELPER METHODS ---
-    def _get_val(self, p: Optional[Dict], key: str) -> Optional[str]:
-        """Safely extracts a value from a potentially nested dictionary."""
-        if not p: return None
-        field_data = p.get(key)
-        if isinstance(field_data, dict):
-            return field_data.get('value')
-        return field_data
-
-    def _get_bbox(self, p: Optional[Dict], key: str) -> Optional[List[int]]:
-        """Safely extracts a bounding box from a potentially nested dictionary."""
-        if not p: return None
-        field_data = p.get(key)
-        if isinstance(field_data, dict):
-            return field_data.get('bbox')
-        return None
-
-    # --- CORE CLASS METHODS ---
-
-    def load_ranked_images_from_folder(self, folder_path: str) -> List[Dict]:
-        """Load ranked images from folder"""
-        folder_path = Path(folder_path)
-        if not folder_path.exists():
-            raise FileNotFoundError(f"Folder not found: {folder_path}")
-
-        image_files = []
-        supported_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.webp'}
-
-        for file_path in folder_path.iterdir():
-            if file_path.suffix.lower() in supported_extensions:
-                rank_patterns = [
-                    r'rank[_\s]*(\d+)',
-                    r'(\d+)[_\s]*rank',
-                    r'position[_\s]*(\d+)',
-                    r'(?:^|[_\s])(\d+)(?:[_\s]|$)'
-                ]
-                rank = None
-                for pattern in rank_patterns:
-                    rank_match = re.search(pattern, file_path.stem, re.IGNORECASE)
-                    if rank_match:
-                        rank = int(rank_match.group(1))
-                        break
-                if rank is None:
-                    rank = len(image_files) + 1
-                image_files.append({
-                    'file_path': str(file_path),
-                    'filename': file_path.name,
-                    'rank': rank,
-                    'folder_name': folder_path.name
-                })
-        image_files.sort(key=lambda x: x['rank'])
-        logger.info(f"Loaded {len(image_files)} ranked images from {folder_path}")
-        return image_files
-
-    def extract_product_data_with_vlm(self, image_path: str, image_rank: int, catalog_name: str) -> Dict:
-        """Extract focused product data with bounding boxes for key elements."""
-        item_id_for_log = f"{catalog_name}-Rank{image_rank}"
-        try:
-            with open(image_path, "rb") as image_file:
-                base64_image = base64.b64encode(image_file.read()).decode('utf-8')
-            
-            system_prompt = """
-            You are a precise data extraction expert for retail catalogs.
-            Analyze the product image and return a JSON object with the specified fields.
-            All bounding boxes must be relative to the image dimensions (top-left is [0,0]).
-            The "product_brand" is the main brand name (e.g., "Tide", "Downy", "Scott").
-            The "size_quantity" is the net weight, volume, or count (e.g., "1.47L", "12 rolls", "8 oz").
-
-            JSON Schema:
-            {
-                "product_brand": {"value": "Product Brand Name"},
-                "size_quantity": {"value": "Size or Quantity"},
-                "offer_price": {"value": "12.97", "bbox": [x1, y1, x2, y2]},
-                "regular_price": {"value": "15.00", "bbox": [x1, y1, x2, y2]},
-                "title": {"value": "Product Title", "bbox": [x1, y1, x2, y2]},
-                "description": {"value": "Product description text.", "bbox": [x1, y1, x2, y2]},
-                "photo_area": {"bbox": [x1, y1, x2, y2]},
-                "product_status": "Product Present"
-            }
-
-            - product_brand: The primary brand name of the product.
-            - size_quantity: The size, weight, volume, or count of the product.
-            - offer_price: The main sale price, usually large.
-            - regular_price: The original price, often smaller and near the description.
-            - title: The main product title.
-            - description: The smaller descriptive text.
-            - photo_area: The bounding box of the main product photograph.
-            - If a field is not present, return null for its value.
-            """
-            messages = [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": system_prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                    ]
-                }
-            ]
-            logger.info(f"ITEM_ID: {item_id_for_log} - Extracting structured data with bboxes...")
-            response = self.openai_client.chat.completions.create(
-                model=self.vlm_model,
-                messages=messages,
-                response_format={"type": "json_object"},
-                max_tokens=2000,
-                temperature=0.1
-            )
-            response_content = response.choices[0].message.content
-            if response_content is None:
-                return {"error_message": "VLM returned no content", "item_id": item_id_for_log}
-            extracted_data = json.loads(response_content)
-            extracted_data.update({
-                'item_id': item_id_for_log, 'image_path': image_path,
-                'rank': image_rank, 'catalog_name': catalog_name,
-                'filename': Path(image_path).name
-            })
-            return extracted_data
-        except Exception as e:
-            logger.error(f"ITEM_ID: {item_id_for_log} - VLM Extraction error: {e}")
-            return {"error_message": str(e), "item_id": item_id_for_log}
-
-    def are_brands_same_product(self, brand1: str, brand2: str) -> Tuple[bool, float]:
-        """Check if two brands represent the same product using fuzzy matching"""
-        if not brand1 or not brand2:
-            return False, 0
-        b1 = str(brand1).lower().strip()
-        b2 = str(brand2).lower().strip()
-        if b1 == b2:
-            return True, 100
-        common_words = ['simply', 'ultra', 'advanced', 'new', 'improved', 'original', 'classic']
-        def clean_brand(brand):
-            words = brand.split()
-            return ' '.join([w for w in words if w not in common_words])
-        b1_clean = clean_brand(b1)
-        b2_clean = clean_brand(b2)
-        scores = [
-            fuzz.ratio(b1_clean, b2_clean),
-            fuzz.partial_ratio(b1_clean, b2_clean),
-            fuzz.token_sort_ratio(b1_clean, b2_clean)
-        ]
-        max_score = max(scores)
-        is_same = max_score >= 80
-        logger.debug(f"Brand comparison: '{brand1}' vs '{brand2}' -> {max_score}% (Same: {is_same})")
-        return is_same, max_score
-
-    def generate_practical_comparison(self, folder1_path: str, folder2_path: str,
-                                      catalog1_name: str = "Cat1", catalog2_name: str = "Cat2") -> Dict:
-        """Generate a practical, detailed comparison by matching products and creating a row for each."""
-        logger.info(f"Starting practical comparison: {catalog1_name} vs {catalog2_name}")
-        catalog1_images = self.load_ranked_images_from_folder(folder1_path)
-        catalog2_images = self.load_ranked_images_from_folder(folder2_path)
-        logger.info(f"Extracting VLM data for {catalog1_name}...")
-        catalog1_products = {img['rank']: self.extract_product_data_with_vlm(img['file_path'], img['rank'], catalog1_name) for img in catalog1_images}
-        logger.info(f"Extracting VLM data for {catalog2_name}...")
-        catalog2_products = {img['rank']: self.extract_product_data_with_vlm(img['file_path'], img['rank'], catalog2_name) for img in catalog2_images}
-        catalog1_products = {k: v for k, v in catalog1_products.items() if "error_message" not in v}
-        catalog2_products = {k: v for k, v in catalog2_products.items() if "error_message" not in v}
-        comparison_rows = {}
-        unmatched_c2_products = list(catalog2_products.values())
-
-        for p1_rank, p1_data in catalog1_products.items():
-            best_match_p2 = None
-            highest_score = -1
-            for p2_data in unmatched_c2_products:
-                is_match, score = self.are_brands_same_product(
-                    self._get_val(p1_data, 'product_brand'),
-                    self._get_val(p2_data, 'product_brand')
-                )
-                if is_match and score > highest_score:
-                    highest_score = score
-                    best_match_p2 = p2_data
-            
-            if best_match_p2:
-                result = self.create_practical_comparison_row(p1_data, best_match_p2)
-                row = {
-                    f"{catalog1_name}_details": result["p1_details"],
-                    f"{catalog2_name}_details": result["p2_details"],
-                    "issues": result["issues"],
-                    "rank_c1": p1_rank,
-                    "rank_c2": best_match_p2.get('rank')
-                }
-                comparison_rows[p1_rank] = row
-                unmatched_c2_products.remove(best_match_p2)
-            else:
-                result = self.create_practical_comparison_row(p1_data, None)
-                row = {
-                    f"{catalog1_name}_details": result["p1_details"],
-                    f"{catalog2_name}_details": result["p2_details"],
-                    "issues": result["issues"],
-                    "rank_c1": p1_rank,
-                    "rank_c2": None
-                }
-                comparison_rows[p1_rank] = row
-
-        for p2_unmatched in unmatched_c2_products:
-            p2_rank = p2_unmatched.get('rank')
-            result = self.create_practical_comparison_row(None, p2_unmatched)
-            row = {
-                f"{catalog1_name}_details": result["p1_details"],
-                f"{catalog2_name}_details": result["p2_details"],
-                "issues": result["issues"],
-                "rank_c1": None,
-                "rank_c2": p2_rank
-            }
-            comparison_rows[f"unmatched_c2_rank_{p2_rank}"] = row
-
-        final_result = {
-            "catalog1_name": catalog1_name,
-            "catalog2_name": catalog2_name,
-            "comparison_rows": comparison_rows,
-            "catalog1_total_products": len(catalog1_products),
-            "catalog2_total_products": len(catalog2_products),
-            "catalog1_products": catalog1_products,
-            "catalog2_products": catalog2_products
-        }
-        logger.info(f"Practical comparison complete. Generated {len(comparison_rows)} comparison rows.")
-        return final_result
-
-    def create_practical_comparison_row(self, product1: Optional[Dict], product2: Optional[Dict]) -> Dict:
-        """Creates a detailed comparison row for two products."""
-        if not product1 and not product2:
-            return {}
-        
-        issues = []
-        p1_info = self.format_product_display(product1)
-        p2_info = self.format_product_display(product2)
-
-        if not product1:
-            return {"p1_details": "Product Missing", "p2_details": p2_info, "issues": ["MISSING_P1"]}
-        if not product2:
-            return {"p1_details": p1_info, "p2_details": "Product Missing", "issues": ["MISSING_P2"]}
-
-        if self._get_val(product1, 'offer_price') != self._get_val(product2, 'offer_price'):
-            issues.append("PRICE_OFFER")
-        if self._get_val(product1, 'regular_price') != self._get_val(product2, 'regular_price'):
-            issues.append("PRICE_REGULAR")
-        
-        p1_title = self._get_val(product1, 'title')
-        p2_title = self._get_val(product2, 'title')
-        if fuzz.ratio(str(p1_title).lower(), str(p2_title).lower()) < 85:
-            issues.append("TEXT_TITLE")
-
-        try:
-            p1_photo_bbox = self._get_bbox(product1, 'photo_area')
-            p2_photo_bbox = self._get_bbox(product2, 'photo_area')
-            if p1_photo_bbox and p2_photo_bbox and product1.get('image_path') and product2.get('image_path'):
-                p1_img = Image.open(product1['image_path'])
-                p2_img = Image.open(product2['image_path'])
-                p1_photo = p1_img.crop(tuple(p1_photo_bbox))
-                p2_photo = p2_img.crop(tuple(p2_photo_bbox))
-
-                if p1_photo.size[0] > 0 and p1_photo.size[1] > 0 and p2_photo.size[0] > 0 and p2_photo.size[1] > 0:
-                    p1_np = np.array(p1_photo.convert('L'))
-                    p2_np = np.array(p2_photo.convert('L').resize(p1_np.T.shape))
-                    
-                    win_size = min(p1_np.shape[0], p1_np.shape[1], p2_np.shape[0], p2_np.shape[1])
-                    if win_size < 7:
-                        logger.warning(f"Photo for {product1.get('item_id', 'N/A')} is smaller than 7x7, skipping SSIM.")
-                    else:
-                        # Ensure win_size is odd
-                        win_size = win_size if win_size % 2 == 1 else win_size - 1
-                        score, _ = structural_similarity(p1_np, p2_np, full=True, data_range=p1_np.max() - p1_np.min(), win_size=win_size)
-                        if score < 0.6:
-                            issues.append("PHOTO")
-                else:
-                    logger.warning(f"Skipping photo SSIM for {product1.get('item_id', 'N/A')} due to zero-sized image after crop.")
-        except Exception as e:
-            logger.warning(f"Could not perform photo comparison for {product1.get('item_id', 'N/A')}: {e}")
-        
-        return {"p1_details": p1_info, "p2_details": p2_info, "issues": issues}
-
-    def format_product_display(self, product: Optional[Dict]) -> str:
-        """Formats product info for display, safely handling direct or nested values."""
-        if not product:
-            return "Product Missing"
-        brand = self._get_val(product, 'product_brand') or 'Unknown Brand'
-        offer_price_val = self._get_val(product, 'offer_price')
-        size = self._get_val(product, 'size_quantity') or 'Unknown Size'
-        price_display = f"${offer_price_val}" if offer_price_val is not None else "No Price"
-        return f"{brand} - {price_display} - {size}"
-
-    def export_practical_comparison(self, comparison_result: Dict, output_path: str):
-        """Export practical comparison results"""
-        if not isinstance(comparison_result.get("comparison_rows"), dict):
-            logger.error("comparison_rows is not a dictionary, cannot export.")
-            return
-
-        df_data = list(comparison_result.get("comparison_rows", {}).values())
-        
-        if not df_data:
-            logger.warning("No comparison rows to export.")
-            df = pd.DataFrame()
-            summary_df = pd.DataFrame({"Metric": ["Total Comparisons"], "Value": [0]})
-        else:
-            df = pd.DataFrame(df_data)
-
-        catalog1_name = comparison_result.get("catalog1_name", "Catalog1")
-        catalog2_name = comparison_result.get("catalog2_name", "Catalog2")
-        
-        # Define the desired columns for the detailed report
-        detailed_columns = [
-            "rank_c1", "rank_c2", 
-            f"{catalog1_name}_details", f"{catalog2_name}_details",
-            "issues"
-        ]
-        # Ensure essential columns exist
-        for col in detailed_columns:
-            if col not in df.columns:
-                df[col] = None
-        df = df.reindex(columns=detailed_columns)
-
-        # Create practical summary
-        comparison_rows_dict = comparison_result.get("comparison_rows", {})
-        total_rows = len(comparison_rows_dict)
-        
-        # This is the corrected block for summary calculation
-        price_issues = len([r for r in comparison_rows_dict.values() if any("PRICE" in str(issue) for issue in r.get("issues", []))])
-        text_issues = len([r for r in comparison_rows_dict.values() if any("TEXT" in str(issue) for issue in r.get("issues", []))])
-        photo_issues = len([r for r in comparison_rows_dict.values() if "PHOTO" in r.get("issues", [])])
-        missing_p1 = len([r for r in comparison_rows_dict.values() if "MISSING_P1" in r.get("issues", [])])
-        missing_p2 = len([r for r in comparison_rows_dict.values() if "MISSING_P2" in r.get("issues", [])])
-        
-        summary_data = {
-            "Metric": [
-                "Total Comparisons Made", 
-                "Matched Products", 
-                f"Products only in {catalog1_name}", 
-                f"Products only in {catalog2_name}", 
-                "Price Mismatches", 
-                "Text Mismatches", 
-                "Photo Mismatches"
-            ],
-            "Value": [
-                total_rows, 
-                total_rows - (missing_p1 + missing_p2), 
-                missing_p2, 
-                missing_p1, 
-                price_issues, 
-                text_issues, 
-                photo_issues
-            ]
-        }
-        summary_df = pd.DataFrame(summary_data)
-
-        # Export to Excel
-        output_path = Path(output_path)
-        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Detailed_Comparison', index=False)
-            summary_df.to_excel(writer, sheet_name='Summary', index=False)
-        
-        logger.info(f"Practical comparison exported to {output_path}")
-
-def main_vlm_comparison(openai_api_key: str, folder1_path: str, folder2_path: str,
-                        catalog1_name: str = None, catalog2_name: str = None,
-                        output_path: str = None, price_tolerance: float = 0.01):
-    """Main function for practical catalog comparison"""
-
-    if not openai_api_key:
-        raise ValueError("Please provide OPENAI_API_KEY")
-
-    if not output_path:
-        output_path = "practical_catalog_comparison.xlsx"
-
-    # Initialize practical comparator
-    comparator = PracticalCatalogComparator(
-        openai_api_key,
-        price_tolerance=price_tolerance
-    )
-
-    try:
-        logger.info("Starting PRACTICAL catalog comparison - focusing on what matters...")
-        results = comparator.generate_practical_comparison(
-            folder1_path,
-            folder2_path,
-            catalog1_name,
-            catalog2_name
-        )
-
-        # Export results
-        comparator.export_practical_comparison(results, output_path)
-
-        print(f"PRACTICAL RESULTS SAVED TO: {output_path}")
-        return results
-
-    except Exception as e:
-        logger.error(f"Error in practical comparison: {e}")
-        raise
-
-# ========================================
-# STREAMLINED CATALOG COMPARISON PIPELINE
-# ========================================
-
-def catalog_comparison_pipeline(
-    pdf_path1: str,
-    pdf_path2: str,
-    template1_path: str,
-    template2_path: str,
-    template3_path: str,
-    roboflow_api_key: str,
-    roboflow_project_name: str,
-    roboflow_version: int,
-    openai_api_key: str,
-    output_directory: str = "catalog_comparison_results",
-    confidence_threshold: float = 25,
-    similarity_threshold: float = 0.55,
-    price_tolerance: float = 0.01,
-    ranking_method: str = "improved_grid",
-    comparison_method: str = "structural",
-    dry_run: bool = False
-):
-    """
-    Complete catalog comparison pipeline that processes two PDFs and template images.
-
-    Args:
-        pdf_path1: Path to first PDF catalog
-        pdf_path2: Path to second PDF catalog
-        template1_path: Path to first template image for filtering
-        template2_path: Path to second template image for filtering
-        template3_path: Path to third template image for filtering
-        roboflow_api_key: Roboflow API key for object detection
-        roboflow_project_name: Roboflow project name
-        roboflow_version: Roboflow model version
-        openai_api_key: OpenAI API key for VLM analysis
-        output_directory: Base output directory for all results
-        confidence_threshold: Detection confidence threshold (default: 25)
-        similarity_threshold: Image similarity threshold for template matching (default: 0.55)
-        price_tolerance: Price difference tolerance for comparison (default: 0.01)
-        ranking_method: Ranking algorithm to use (default: "improved_grid")
-        comparison_method: Image comparison method (default: "structural")
-        dry_run: If True, show what would be done without executing (default: False)
-
-    Returns:
-        Dictionary containing all pipeline results and file paths
-    """
-
-    print("=" * 80)
-    print("CATALOG COMPARISON PIPELINE - COMPLETE AUTOMATION")
-    print("=" * 80)
-    print(f"PDF 1: {Path(pdf_path1).name}")
-    print(f"PDF 2: {Path(pdf_path2).name}")
-    print(f"Templates: {Path(template1_path).name}, {Path(template2_path).name}, {Path(template3_path).name}")
-    print(f"Output Directory: {output_directory}")
-    print(f"Detection Confidence: {confidence_threshold}%")
-    print(f"Similarity Threshold: {similarity_threshold}")
-    print(f"Price Tolerance: ${price_tolerance}")
-    print(f"Poppler Path: {get_poppler_path() if get_poppler_path() else 'System PATH'}")
-    print(f"Mode: {'DRY RUN' if dry_run else 'EXECUTE'}")
-    print("=" * 80)
-
-    pipeline_results = {
-        "step1_pdf_processing": None,
-        "step2_template_filtering": None,
-        "step3_vlm_comparison": None,
-        "final_output_path": None,
-        "pipeline_summary": {},
-        "errors": []
-    }
-
-    try:
-        # ==============================
-        # STEP 1: PDF PROCESSING AND RANKING
-        # ==============================
-        print("\nSTEP 1: PDF PROCESSING AND PRODUCT EXTRACTION")
-        print("-" * 50)
-
-        # Initialize Roboflow model
-        try:
-            from roboflow import Roboflow
-            rf = Roboflow(api_key=roboflow_api_key)
-            project = rf.project(roboflow_project_name)
-            model = project.version(roboflow_version).model
-            print(f"Roboflow model initialized: {roboflow_project_name} v{roboflow_version}")
-        except Exception as e:
-            error_msg = f"Failed to initialize Roboflow model: {e}"
-            pipeline_results["errors"].append(error_msg)
-            raise Exception(error_msg)
-
-        # Process PDFs
-        pdf_output_dir = os.path.join(output_directory, "01_pdf_processing")
-
-        pdf_results = main_dual_pdf_processing(
-            pdf_path1=pdf_path1,
-            pdf_path2=pdf_path2,
-            roboflow_model=model,
-            output_root=pdf_output_dir,
-            ranking_method=ranking_method,
-            confidence_threshold=confidence_threshold
-        )
-
-        pipeline_results["step1_pdf_processing"] = pdf_results
-        print(f"PDF processing complete:")
-        print(f"Catalog 1: {pdf_results['total_products_catalog1']} products")
-        print(f"Catalog 2: {pdf_results['total_products_catalog2']} products")
-
-        # ==============================
-        # STEP 2: TEMPLATE-BASED FILTERING
-        # ==============================
-        print("\n🧹 STEP 2: TEMPLATE-BASED IMAGE FILTERING")
-        print("-" * 50)
-
-        template_results = {}
-
-        # Process each page in both catalogs
-        catalog1_path = Path(pdf_results["catalog1_path"])
-        catalog2_path = Path(pdf_results["catalog2_path"])
-
-        # Find all page folders
-        catalog1_pages = [d for d in catalog1_path.iterdir() if d.is_dir() and d.name.startswith("page_")]
-        catalog2_pages = [d for d in catalog2_path.iterdir() if d.is_dir() and d.name.startswith("page_")]
-
-        all_page_pairs = []
-        max_pages = max(len(catalog1_pages), len(catalog2_pages))
-
-        for i in range(max_pages):
-            folder1 = str(catalog1_pages[i]) if i < len(catalog1_pages) else None
-            folder2 = str(catalog2_pages[i]) if i < len(catalog2_pages) else None
-            if folder1 or folder2:
-                all_page_pairs.append((folder1, folder2))
-
-        print(f"Found {len(all_page_pairs)} page pairs to process")
-
-        for page_idx, (folder1, folder2) in enumerate(all_page_pairs, 1):
-            print(f"\nProcessing Page {page_idx}...")
-
-            if folder1 and folder2:
-                try:
-                    process_folders_with_image_templates(
-                        template1_path=template1_path,
-                        template2_path=template2_path,
-                        template3_path=template3_path,
-                        folder1_path=folder1,
-                        folder2_path=folder2,
-                        similarity_threshold=similarity_threshold,
-                        comparison_method=comparison_method,
-                        dry_run=dry_run
-                    )
-                    template_results[f"page_{page_idx}"] = "Processed successfully"
-                    print(f"Page {page_idx} template filtering complete")
-
-                except Exception as e:
-                    error_msg = f"Template filtering failed for page {page_idx}: {e}"
-                    template_results[f"page_{page_idx}"] = error_msg
-                    pipeline_results["errors"].append(error_msg)
-                    print(f"{error_msg}")
-            else:
-                print(f"Skipping page {page_idx} - missing folder(s)")
-
-        pipeline_results["step2_template_filtering"] = template_results
-
-        # ==============================
-        # STEP 3: VLM-BASED COMPARISON
-        # ==============================
-        print("\nSTEP 3: VLM-BASED CATALOG COMPARISON")
-        print("-" * 50)
-
-        comparison_results = {}
-
-        # Compare each page pair using VLM
-        for page_idx, (folder1, folder2) in enumerate(all_page_pairs, 1):
-            if folder1 and folder2 and os.path.exists(folder1) and os.path.exists(folder2):
-                print(f"\n Analyzing Page {page_idx} with VLM...")
-
-                try:
-                    # Create output path for this page comparison
-                    page_output_path = os.path.join(output_directory, "03_vlm_comparison", f"page_{page_idx}_comparison.xlsx")
-                    os.makedirs(os.path.dirname(page_output_path), exist_ok=True)
-
-                    vlm_results = main_vlm_comparison(
-                        openai_api_key=openai_api_key,
-                        folder1_path=folder1,
-                        folder2_path=folder2,
-                        catalog1_name=f"Catalog1_Page{page_idx}",
-                        catalog2_name=f"Catalog2_Page{page_idx}",
-                        output_path=page_output_path,
-                        price_tolerance=price_tolerance
-                    )
-
-                    comparison_results[f"page_{page_idx}"] = {
-                        "results": vlm_results,
-                        "output_path": page_output_path
-                    }
-                    print(f"Page {page_idx} VLM comparison complete")
-
-                except Exception as e:
-                    error_msg = f"VLM comparison failed for page {page_idx}: {e}"
-                    comparison_results[f"page_{page_idx}"] = {"error": error_msg}
-                    pipeline_results["errors"].append(error_msg)
-                    print(f"{error_msg}")
-            else:
-                print(f"Skipping VLM comparison for page {page_idx} - missing folders")
-
-        pipeline_results["step3_vlm_comparison"] = comparison_results
-
-          # Calculate detailed summary
-        total_mistakes = 0
-        price_mistakes = 0
-        text_mistakes = 0
-        photo_mistakes = 0
-        missing_products = 0
-
-        if pipeline_results.get("step3_vlm_comparison"):
-            all_vlm_results = pipeline_results["step3_vlm_comparison"]
-            
-            for page_key, page_data in all_vlm_results.items():
-                if "results" in page_data and isinstance(page_data["results"], dict):
-                    comparison_rows = page_data["results"].get("comparison_rows", {})
-                    
-                    for row_key, row_data in comparison_rows.items():
-                        if isinstance(row_data, dict):
-                            issues = row_data.get("issues", [])
-                            
-                            for issue in issues:
-                                total_mistakes += 1
-                                
-                                if issue in ["PRICE_OFFER", "PRICE_REGULAR"]:
-                                    price_mistakes += 1
-                                elif issue in ["TEXT_TITLE", "TEXT_DESCRIPTION"]:
-                                    text_mistakes += 1
-                                elif issue == "PHOTO":
-                                    photo_mistakes += 1
-                                elif issue in ["MISSING_P1", "MISSING_P2"]:
-                                    missing_products += 1
-
-        # Add to pipeline results
-        pipeline_results["detailed_summary"] = {
-            "total_mistakes": total_mistakes,
-            "price_mistakes": price_mistakes,
-            "text_mistakes": text_mistakes,
-            "photo_mistakes": photo_mistakes,
-            "missing_products": missing_products
-        }
-
-        logger.info(f"Summary - Total: {total_mistakes}, Price: {price_mistakes}, "
-                f"Text: {text_mistakes}, Photo: {photo_mistakes}, Missing: {missing_products}")
+                    os.remove(temp_path)
+                except Exception as e_del_final:
+                    logger.error(f"REQUEST_ID: {request_id} - Error deleting temp PDF {temp_path} in final cleanup: {e_del_final}", exc_info=True)
+        logger.info(f"REQUEST_ID: {request_id} - process_files_for_comparison endpoint finished.")
         
 
-        if "step3_vlm_comparison" in pipeline_results and pipeline_results["step3_vlm_comparison"]:
-            vlm_all_pages_data = pipeline_results["step3_vlm_comparison"]
-            logger.info("Updating visualizations with VLM comparison results...")
-
-            # Iterate through each page's VLM results
-            for page_id_key, page_vlm_data in vlm_all_pages_data.items(): # e.g., page_id_key = "page_1"
-                if "error" in page_vlm_data or "results" not in page_vlm_data:
-                    logger.warning(f"Skipping VLM viz update for {page_id_key} due to error or missing results.")
-                    continue
-
-                vlm_results_for_page = page_vlm_data["results"]
-                page_num_match = re.search(r'(\d+)', page_id_key) # Get page number
-                if not page_num_match:
-                    logger.warning(f"Could not extract page number from VLM result key: {page_id_key}")
-                    continue
-                page_num = int(page_num_match.group(1))
-
-                comparison_rows = vlm_results_for_page.get("comparison_rows", {})
-                
-                # Determine issue ranks for catalog 1 and catalog 2 for the current page
-                issue_ranks_cat1 = set()
-                issue_ranks_cat2 = set()
-
-                # Iterate over the comparison_rows dictionary correctly
-                for row_key, row_data in comparison_rows.items():
-                    if not isinstance(row_data, dict):
-                        continue
-                    
-                    # Get the actual ranks from the row data
-                    rank_c1 = row_data.get("rank_c1")
-                    rank_c2 = row_data.get("rank_c2")
-                    issues = row_data.get("issues", [])
-                    
-                    if not issues:
-                        continue  # No issues for this row
-                    
-                    # Check for missing products
-                    if "MISSING_P1" in issues:
-                        # Product missing in catalog 1, exists in catalog 2
-                        if rank_c2:
-                            issue_ranks_cat2.add(rank_c2)
-                    elif "MISSING_P2" in issues:
-                        # Product missing in catalog 2, exists in catalog 1
-                        if rank_c1:
-                            issue_ranks_cat1.add(rank_c1)
-                    else:
-                        # Other issues (PRICE_OFFER, PRICE_REGULAR, TEXT_TITLE, TEXT_DESCRIPTION, PHOTO)
-                        # Add to both catalogs if product exists in both
-                        if rank_c1:
-                            issue_ranks_cat1.add(rank_c1)
-                        if rank_c2:
-                            issue_ranks_cat2.add(rank_c2)
-
-                # Regenerate visualization for Catalog 1, Page `page_num`
-                if pdf_results and page_num in pdf_results.get("page_level_data_catalog1", {}):
-                    page_info_c1 = pdf_results["page_level_data_catalog1"][page_num]
-                    pil_img_c1 = page_info_c1.get('image_pil')
-                    ranked_boxes_c1 = page_info_c1.get('ranked_boxes')
-                    # Path where cropped images (and thus visualizations) for this page are stored
-                    page_folder_c1 = Path(page_info_c1.get('page_folder_path')) 
-                    
-                    if pil_img_c1 and ranked_boxes_c1 and page_folder_c1.exists():
-                        viz_filename_c1 = f"c1_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
-                        viz_output_path_c1 = page_folder_c1 / viz_filename_c1
-                        create_ranking_visualization(
-                            pil_img=pil_img_c1,
-                            ranked_boxes=ranked_boxes_c1,  # Fixed parameter name
-                            comparison_details=vlm_results_for_page,  # Add this
-                            output_path=str(viz_output_path_c1),
-                            catalog_id='c1'  # Add this
-                        )
-                        logger.info(f"Updated visualization for Catalog 1 Page {page_num}: {viz_output_path_c1} with issues: {issue_ranks_cat1}")
-                    else:
-                        logger.warning(f"Could not update viz for Cat1 Page {page_num}, missing PIL/boxes or folder path.")
-
-                # Regenerate visualization for Catalog 2, Page `page_num`
-                if pdf_results and page_num in pdf_results.get("page_level_data_catalog2", {}):
-                    page_info_c2 = pdf_results["page_level_data_catalog2"][page_num]
-                    pil_img_c2 = page_info_c2.get('image_pil')
-                    ranked_boxes_c2 = page_info_c2.get('ranked_boxes')
-                    page_folder_c2 = Path(page_info_c2.get('page_folder_path'))
-
-                    if pil_img_c2 and ranked_boxes_c2 and page_folder_c2.exists():
-                        viz_filename_c2 = f"c2_p{page_num}_ranking_visualization.jpg" # Matches frontend expectation
-                        viz_output_path_c2 = page_folder_c2 / viz_filename_c2
-                        create_ranking_visualization(
-                            pil_img=pil_img_c2,
-                            ranked_boxes=ranked_boxes_c2,  # Fixed parameter name
-                            comparison_details=vlm_results_for_page,  # Add this
-                            output_path=str(viz_output_path_c2),
-                            catalog_id='c2'  # Add this
-                        )
-                        logger.info(f"Updated visualization for Catalog 2 Page {page_num}: {viz_output_path_c2} with issues: {issue_ranks_cat2}")
-                    else:
-                        logger.warning(f"Could not update viz for Cat2 Page {page_num}, missing PIL/boxes or folder path.")
-        else:
-            logger.info("No VLM comparison results found or step3_vlm_comparison is empty. Visualizations will not be updated with VLM issues.")
-            
-        
-        
-     
-        
-        
-        # ==============================
-        # STEP 4: CONSOLIDATE RESULTS
-        # ==============================
-        print("\nSTEP 4: CONSOLIDATING FINAL RESULTS")
-        print("-" * 50)
-
-        # Create final summary
-        total_catalog1_products = sum([
-            results["results"]["catalog1_total_products"]
-            for results in comparison_results.values()
-            if "results" in results and "catalog1_total_products" in results["results"]
-        ])
-
-        total_catalog2_products = sum([
-            results["results"]["catalog2_total_products"]
-            for results in comparison_results.values()
-            if "results" in results and "catalog2_total_products" in results["results"]
-        ])
-
-        total_comparisons = sum([
-            len(results["results"]["comparison_rows"])
-            for results in comparison_results.values()
-            if "results" in results and "comparison_rows" in results["results"]
-        ])
-
-        # Create consolidated summary file
-        final_output_path = os.path.join(output_directory, "FINAL_COMPARISON_SUMMARY.xlsx")
-
-        summary_data = {
-            "Metric": [
-                "Pipeline Execution Mode",
-                "Total Pages Processed",
-                "PDF 1 Total Products",
-                "PDF 2 Total Products",
-                "Total Comparisons Made",
-                "Template Filtering Applied",
-                "VLM Analysis Applied",
-                "Detection Confidence Used",
-                "Similarity Threshold Used",
-                "Price Tolerance Used",
-                "Ranking Method Used",
-                "Comparison Method Used",
-                "Poppler Path Used",
-                "Total Errors Encountered"
-            ],
-            "Value": [
-                "DRY RUN" if dry_run else "EXECUTED",
-                len(all_page_pairs),
-                total_catalog1_products,
-                total_catalog2_products,
-                total_comparisons,
-                "Yes" if template_results else "No",
-                "Yes" if comparison_results else "No",
-                f"{confidence_threshold}%",
-                f"{similarity_threshold}",
-                f"${price_tolerance}",
-                ranking_method,
-                comparison_method,
-                get_poppler_path() if get_poppler_path() else "System PATH",
-                len(pipeline_results["errors"])
-            ]
-        }
-
-        summary_df = pd.DataFrame(summary_data)
-
-        # Create file list
-        output_files = []
-        for page_results in comparison_results.values():
-            if "output_path" in page_results:
-                output_files.append(page_results["output_path"])
-
-        files_data = {
-            "Output File": output_files,
-            "Description": [f"VLM comparison results for {Path(f).stem}" for f in output_files]
-        }
-        files_df = pd.DataFrame(files_data)
-
-        # Export consolidated summary
-        with pd.ExcelWriter(final_output_path, engine='openpyxl') as writer:
-            summary_df.to_excel(writer, sheet_name='Pipeline_Summary', index=False)
-            files_df.to_excel(writer, sheet_name='Output_Files', index=False)
-
-            # Add errors sheet if any
-            if pipeline_results["errors"]:
-                errors_df = pd.DataFrame({"Errors": pipeline_results["errors"]})
-                errors_df.to_excel(writer, sheet_name='Errors', index=False)
-
-        pipeline_results["final_output_path"] = final_output_path
-        pipeline_results["pipeline_summary"] = summary_data
-
-        print(f"Pipeline consolidation complete")
-        print(f"Final summary saved to: {final_output_path}")
-
-        # ==============================
-        # FINAL PIPELINE SUMMARY
-        # ==============================
-        print("\n" + "=" * 80)
-        print("CATALOG COMPARISON PIPELINE COMPLETE")
-        print("=" * 80)
-        print(f"FINAL RESULTS:")
-        print(f"Pages Processed: {len(all_page_pairs)}")
-        print(f"Total Products Catalog 1: {total_catalog1_products}")
-        print(f"Total Products Catalog 2: {total_catalog2_products}")
-        print(f"Total Comparisons: {total_comparisons}")
-        print(f"Errors Encountered: {len(pipeline_results['errors'])}")
-        print(f"Output Directory: {output_directory}")
-        print(f"Final Summary: {final_output_path}")
-        print(f"Poppler Used: {get_poppler_path() if get_poppler_path() else 'System PATH'}")
-
-        if pipeline_results["errors"]:
-            print(f"\nERRORS ENCOUNTERED:")
-            for i, error in enumerate(pipeline_results["errors"], 1):
-                print(f"   {i}. {error}")
-
-        print("\nPipeline executed successfully!")
-        return pipeline_results
-
-    except Exception as e:
-        error_msg = f"Pipeline failed: {e}"
-        pipeline_results["errors"].append(error_msg)
-        print(f"\n PIPELINE FAILED: {error_msg}")
-        raise
-
-
-# ========================================
-# SIMPLE USAGE FUNCTION
-# ========================================
-
-def simple_catalog_comparison(
-    pdf1_path: str,
-    pdf2_path: str,
-    template1_path: str,
-    template2_path: str,
-    template3_path: str,
-    roboflow_api_key: str = None,
-    openai_api_key: str = None,
-    roboflow_project: str = "my-first-project-c49lu",
-    roboflow_version: int = 1,
-    poppler_path: str = None
-):
-    """
-    Simplified function that uses environment variables for API keys if not provided.
-
-    Args:
-        pdf1_path: Path to first PDF
-        pdf2_path: Path to second PDF
-        template1_path: Path to first template image
-        template2_path: Path to second template image
-        template3_path: Path to third template image
-        roboflow_api_key: Roboflow API key (optional, will use env var)
-        openai_api_key: OpenAI API key (optional, will use env var)
-        roboflow_project: Roboflow project name
-        roboflow_version: Roboflow model version
-        poppler_path: Custom poppler path (optional, will use default detection)
-    """
-
-    # Set custom poppler path if provided
-    if poppler_path:
-        global POPPLER_PATH
-        POPPLER_PATH = poppler_path
-        print(f"Using custom poppler path: {poppler_path}")
-
-    # Get API keys from environment if not provided
-    if not roboflow_api_key:
-        roboflow_api_key = os.getenv('ROBOFLOW_API_KEY')
-    if not openai_api_key:
-        openai_api_key = os.getenv('OPENAI_API_KEY')
-
-    if not roboflow_api_key:
-        raise ValueError("Roboflow API key required. Set ROBOFLOW_API_KEY environment variable or pass as parameter.")
-    if not openai_api_key:
-        raise ValueError("OpenAI API key required. Set OPENAI_API_KEY environment variable or pass as parameter.")
-
-    return catalog_comparison_pipeline(
-        pdf_path1=pdf1_path,
-        pdf_path2=pdf2_path,
-        template1_path=template1_path,
-        template2_path=template2_path,
-        template3_path=template3_path,
-        roboflow_api_key=roboflow_api_key,
-        roboflow_project_name=roboflow_project,
-        roboflow_version=roboflow_version,
-        openai_api_key=openai_api_key
-    )
-
-
-if __name__ == "__main__":
-    print("=" * 80)
-    print("STREAMLINED CATALOG COMPARISON PIPELINE")
-    print("=" * 80)
-    print("This script provides a complete automated pipeline for catalog comparison.")
-    print()
-    print("POPPLER CONFIGURATION:")
-    poppler_path = get_poppler_path()
-    if poppler_path:
-        print(f"✓ Poppler found at: {poppler_path}")
-    else:
-        print("⚠ Poppler path not found. Using system PATH.")
-        print("  If you encounter PDF conversion errors, please:")
-        print("  1. Install poppler-utils")
-        print("  2. Update POPPLER_PATH variable in the script")
-        print("  3. Or add poppler to your system PATH")
-    print()
-    print("USAGE:")
-    print("1. Set environment variables: ROBOFLOW_API_KEY and OPENAI_API_KEY")
-    print("2. Call simple_catalog_comparison() with your file paths")
-    print()
-    print("EXAMPLE:")
-    print('results = simple_catalog_comparison(')
-    print('    pdf1_path="/path/to/catalog1.pdf",')
-    print('    pdf2_path="/path/to/catalog2.pdf",')
-    print('    template1_path="/path/to/template1.jpg",')
-    print('    template2_path="/path/to/template2.jpg",')
-    print('    template3_path="/path/to/template3.jpg",')
-    print('    poppler_path="C:/Program Files/poppler-0.68.0/bin"  # Optional')
-    print(')')
-    print()
-    print("Or use the full pipeline function for more control over parameters.")
-    print("=" * 80)
+# If you want to test this module directly (optional)
+if __name__ == '__main__':
+    logger.info("backend_processor.py is being run directly (e.g., for testing).")
+    # Add test code here if needed, e.g., load sample PDF bytes and call process_files_for_comparison
+    # Example:
+    # try:
+    #     with open("path/to/your/sample1.pdf", "rb") as f1, open("path/to/your/sample2.pdf", "rb") as f2:
+    #         file1_bytes_test = f1.read()
+    #         file2_bytes_test = f2.read()
+    #         results = process_files_for_comparison(file1_bytes_test, "sample1.pdf", file2_bytes_test, "sample2.pdf")
+    #         logger.info("Test run completed. Results snippet:")
+    #         logger.info(f"Message: {results.get('message')}")
+    #         logger.info(f"CSV Data (first 100 chars): {results.get('report_csv_data', '')[:100]}")
+    # except FileNotFoundError:
+    #     logger.error("Test PDF files not found. Skipping direct run test.")
+    # except Exception as e:
+    #     logger.error(f"Error during direct run test: {e}", exc_info=True)
