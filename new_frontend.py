@@ -31,27 +31,31 @@ else:
 BACKEND_AVAILABLE = False
 
 # This function is now defined in the frontend to bridge the gap with the backend.
-def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_name):
-    global BACKEND_AVAILABLE
-
+def process_files_for_comparison_bridge(file1_bytes, file1_name, file2_bytes, file2_name):
+    """
+    This function now correctly imports and calls the main processing function
+    from your backend_processor.py file.
+    """
     try:
-        # Attempt to import the specific backend function needed
-        from visual_layout_backend import simple_catalog_comparison
-        BACKEND_AVAILABLE = True
-        logging.info("Successfully imported 'simple_catalog_comparison' from backend.")
-    except ImportError as e:
-        logging.error(f"Failed to import 'simple_catalog_comparison' from visual_layout_backend: {e}", exc_info=True)
-        st.error("Critical backend function 'simple_catalog_comparison' is not available. Please check the backend script ('visual_layout_backend.py') and dependencies.")
-        BACKEND_AVAILABLE = False
-        # Return the error structure frontend expects
-        return {
-            "error": "Backend processing function 'simple_catalog_comparison' not found in 'visual_layout_backend.py'.",
-            "message": "Error: Backend not available or function missing.",
-            "product_items_file1_count": 0, "product_items_file2_count": 0,
-            "product_comparison_details": [], "report_csv_data": "Error,Backend not available\n",
-            "all_product_details_file1": [], "all_product_details_file2": [],
-            "highlighted_pages_file1": [], "highlighted_pages_file2": []
-        }
+        # Directly import the correct function from your backend file
+        # new_frontend.py - CORRECTED
+        from visual_layout_backend import process_files_for_comparison
+        logging.info("Successfully imported 'process_files_for_comparison' from backend.")
+
+        # Call the imported backend function with the file data
+        results = process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_name)
+        return results
+
+    except ImportError:
+        logging.error("Failed to import 'process_files_for_comparison' from backend_processor.py.", exc_info=True)
+        st.error("Critical backend function 'process_files_for_comparison' is not available. Please ensure 'backend_processor.py' is in the same directory.")
+        # Return an error structure the frontend expects
+        return { "error": "Backend function not found." }
+    except Exception as e:
+        logging.error(f"An error occurred during the backend call: {e}", exc_info=True)
+        st.error(f"An error occurred during backend processing: {e}")
+        return { "error": str(e) }
+
 
     # Create a temporary directory for processing files
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -369,7 +373,7 @@ if st.button("Compare", key="compare_button_main", type="primary"):
                 status_text.text("Calling backend for analysis...")
                 progress_bar.progress(15)
                 
-                results = process_files_for_comparison(
+                results = process_files_for_comparison_bridge(
                     st.session_state.file1_bytes, st.session_state.file1_name,
                     st.session_state.file2_bytes, st.session_state.file2_name
                 )
