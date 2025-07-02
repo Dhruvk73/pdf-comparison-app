@@ -1,4 +1,4 @@
-# backend_processor.py
+# visual_layout_backend.py
 import openai
 import time
 import logging
@@ -17,6 +17,10 @@ from PIL import Image
 import base64 # For Vision LLM image encoding
 from werkzeug.utils import secure_filename # Useful for sanitizing filenames for S3 keys if needed
 from PIL import ImageDraw, ImageFont
+from fuzzywuzzy import fuzz
+from pathlib import Path
+from transformers import CLIPProcessor, CLIPModel
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,19 @@ except ImportError:
 from fuzzywuzzy import fuzz
 
 load_dotenv()
+
+# --- NEW: Initialize Open-Source Vision Model ---
+# Load the model only once when the module is loaded to avoid reloading on every call
+try:
+    OPEN_SOURCE_VISION_MODEL_ID = "openai/clip-vit-base-patch32"
+    vision_model = CLIPModel.from_pretrained(OPEN_SOURCE_VISION_MODEL_ID)
+    vision_processor = CLIPProcessor.from_pretrained(OPEN_SOURCE_VISION_MODEL_ID)
+    logger.info(f"Successfully loaded open-source vision model: {OPEN_SOURCE_VISION_MODEL_ID}")
+except Exception as e:
+    vision_model = None
+    vision_processor = None
+    logger.error(f"Failed to load open-source vision model. Photo mistake check will be disabled. Error: {e}", exc_info=True)
+# --- END NEW SECTION ---
 
 # --- Logger Setup ---
 # Configure logging (you can simplify or adapt your existing setup)
@@ -403,40 +420,67 @@ def validate_price_pair(offer_price, regular_price, item_id_for_log="N/A"):
     logger.debug(f"ITEM_ID: {item_id_for_log} - validate_price_pair - Prices validated (O:{op}, R:{rp}). No swap needed or already swapped.")
     return op, rp
 
+# REPLACE the entire find_bbox_for_text function with this new, more robust version.
+
 def find_bbox_for_text(text_to_find, textract_blocks, fuzz_threshold=80):
     """
-    Finds the bounding box for a given text string within a list of Textract blocks.
-    Uses fuzzy matching for robustness. Returns normalized bbox (0-1).
+    Finds a merged bounding box for a phrase by locating its constituent words
+    within a list of Textract WORD blocks and merging their geometries.
+    This version is more robust against LLM rephrasing.
     """
     if not text_to_find or not textract_blocks:
         return None
 
-    text_to_find_lower = str(text_to_find).lower()
-    best_match_bbox = None
-    best_match_score = 0
+    # Clean and split the target phrase from the LLM into individual words
+    target_words = str(text_to_find).lower().strip().split()
+    if not target_words:
+        return None
 
-    for block in textract_blocks:
-        block_text = block.get('Text', '').lower()
-        if block_text:
-            # Use token_set_ratio for better handling of word order/extra words
-            score = fuzz.token_set_ratio(text_to_find_lower, block_text)
-            if score > best_match_score and score >= fuzz_threshold:
-                best_match_score = score
-                # Combine multiple word bounding boxes if necessary, or just use the line's bbox
-                # For simplicity, we'll try to get the overall bounding box of the matched text within the segment
-                # If block is a WORD, use its bbox. If a LINE, use its bbox.
-                bbox = block.get('Geometry', {}).get('BoundingBox')
-                if bbox:
-                    best_match_bbox = {
-                        'x_min': bbox['Left'],
-                        'y_min': bbox['Top'],
-                        'x_max': bbox['Left'] + bbox['Width'],
-                        'y_max': bbox['Top'] + bbox['Height']
-                    }
-    logger.debug(f"Found bbox for '{text_to_find}' with score {best_match_score}: {best_match_bbox}")
-    return best_match_bbox
+    word_blocks = [block for block in textract_blocks if block.get('BlockType') == 'WORD']
+    found_bboxes = []
+    
+    # For each word the LLM provided, find the best matching word in the Textract output
+    for target_word in target_words:
+        best_match_block = None
+        highest_score = 0
+        
+        for block in word_blocks:
+            block_text = block.get('Text', '').lower()
+            if not block_text:
+                continue
 
-def extract_product_data_with_llm(product_snippet_text: str, item_id_for_log="N/A", llm_model: str = "gpt-4o", textract_blocks_in_segment: list = None) -> dict: # NEW parameter
+            # Use token_set_ratio, which is very effective for finding a word within another
+            # e.g., finding "rollos" inside "rollos_dobles"
+            score = fuzz.token_set_ratio(target_word, block_text)
+            
+            if score > highest_score:
+                highest_score = score
+                best_match_block = block
+
+        # If a sufficiently good match was found, add its bbox
+        if best_match_block and highest_score >= fuzz_threshold:
+            bbox = best_match_block.get('Geometry', {}).get('BoundingBox')
+            if bbox:
+                found_bboxes.append(bbox)
+                # To prevent re-matching the same block, we can temporarily remove it
+                # This helps if a word appears multiple times (e.g., "Clorox")
+                word_blocks.remove(best_match_block)
+
+    if not found_bboxes:
+        logger.warning(f"find_bbox_for_text could not find any matching words for phrase: '{text_to_find}'")
+        return None
+
+    # Merge the bounding boxes of all found words into a single, encompassing box
+    x_min = min(b['Left'] for b in found_bboxes)
+    y_min = min(b['Top'] for b in found_bboxes)
+    x_max = max(b['Left'] + b['Width'] for b in found_bboxes)
+    y_max = max(b['Top'] + b['Height'] for b in found_bboxes)
+
+    merged_bbox = {'x_min': x_min, 'y_min': y_min, 'x_max': x_max, 'y_max': y_max}
+    logger.debug(f"Successfully found and merged bbox for '{text_to_find}': {merged_bbox}")
+    return merged_bbox
+
+def extract_product_data_with_llm(product_snippet_text: str, item_id_for_log="N/A", llm_model: str = "gpt-4o", textract_blocks_in_segment: list = None) -> dict:
     if not openai_client_instance:
         logger.error(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - OpenAI client not initialized.")
         return {"error_message": "OpenAI client not initialized", "llm_input_snippet": product_snippet_text}
@@ -498,48 +542,18 @@ Return ONLY a JSON object.
             model=llm_model, messages=messages, response_format={"type": "json_object"}, temperature=0.1
         )
         response_content = chat_completion.choices[0].message.content
-        logger.debug(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - Text LLM Raw Response Content: {response_content}")
-        if response_content is None:
-            logger.error(f"ITEM_ID: {item_id_for_log} - Text LLM returned None content.")
-            return {"error_message": "Text LLM returned no content", "llm_input_snippet": product_snippet_text}
-
         extracted_data = json.loads(response_content)
-        logger.debug(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - LLM Data (after json.loads): {json.dumps(extracted_data, indent=2)}")
-        
-        extracted_data['offer_price'] = parse_price_string(extracted_data.get('offer_price'), item_id_for_log=f"{item_id_for_log}-llm_offer")
-        extracted_data['regular_price'] = parse_price_string(extracted_data.get('regular_price'), item_id_for_log=f"{item_id_for_log}-llm_regular")
-        
-        expected_fields = ["product_brand", "product_name_core", "product_variant_description", "size_quantity_info", "offer_price", "regular_price", "unit_indicator", "store_specific_terms"]
-        for field in expected_fields:
-            if field not in extracted_data: extracted_data[field] = None
 
-        # NEW: Find bounding boxes using Textract blocks
-        if textract_blocks_in_segment:
-            for field in ["offer_price", "regular_price", "product_brand", "product_name_core", "product_variant_description", "size_quantity_info", "unit_indicator", "store_specific_terms"]:
-                field_value = extracted_data.get(field)
-                if field_value is not None:
-                    # Convert price floats back to string for fuzzy matching (e.g. 6.97 to "6.97")
-                    if field in ["offer_price", "regular_price"]:
-                        field_value_str = f"{field_value:.2f}" if isinstance(field_value, (float, int)) else str(field_value)
-                    else:
-                        field_value_str = str(field_value)
-                    
-                    bbox = find_bbox_for_text(field_value_str, textract_blocks_in_segment)
-                    if bbox:
-                        extracted_data[f"{field}_bbox"] = bbox
-                        logger.debug(f"ITEM_ID: {item_id_for_log} - Found Textract bbox for {field}: {bbox}")
-                    else:
-                        logger.debug(f"ITEM_ID: {item_id_for_log} - No Textract bbox found for {field} text: '{field_value_str}'")
-
-        logger.info(f"ITEM_ID: {item_id_for_log} - Successfully extracted and parsed data from Text LLM.")
-        logger.debug(f"ITEM_ID: {item_id_for_log} - Parsed LLM Data: {json.dumps(extracted_data, indent=2)}")
+        # Clean up prices, but do NOT look for bboxes here anymore.
+        extracted_data['offer_price'] = parse_price_string(extracted_data.get('offer_price'), item_id_for_log)
+        extracted_data['regular_price'] = parse_price_string(extracted_data.get('regular_price'), item_id_for_log)
+        
+        logger.info(f"ITEM_ID: {item_id_for_log} - LLM text extraction successful.")
         return extracted_data
-    except json.JSONDecodeError as je:
-        logger.error(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - JSONDecodeError: {je}. Response: {response_content}", exc_info=True)
-        return {"error_message": f"JSONDecodeError: {je}", "llm_input_snippet": product_snippet_text, "llm_response_content": response_content}
+
     except Exception as e:
-        logger.error(f"ITEM_ID: {item_id_for_log} - extract_product_data_with_llm - Error in Text LLM processing: {e}", exc_info=True)
-        return {"error_message": str(e), "llm_input_snippet": product_snippet_text, "llm_response_content": locals().get("response_content", "N/A")}
+        logger.error(f"ITEM_ID: {item_id_for_log} - Error in LLM text extraction: {e}", exc_info=True)
+        return {"error_message": str(e)}
 
 
 def get_segment_image_bytes(page_image_pil: Image.Image, box_coords_pixels_center_wh: dict, item_id_for_log="N/A") -> BytesIO | None:
@@ -966,120 +980,115 @@ def enhanced_normalize_product_data(product_data, item_id_for_log, price_candida
 
     return normalized_item_data
 
-# In backend_processor.py
 
-# In backend_processor.py
 
 # In visual_layout_backend.py
+# REPLACE the entire post_process_and_validate_item_data function with this one.
 
-# REPLACE this function in backend_processor.py
+# REPLACE the entire post_process_and_validate_item_data function with this one.
 
-def post_process_and_validate_item_data(llm_data, price_candidates, original_collated_text, item_id_for_log="N/A"):
-    if not isinstance(llm_data, dict) or "error_message" in llm_data:
-        # Handle cases where the initial LLM call failed entirely
-        return {
-            'offer_price': None, 'regular_price': None, 'product_brand': None,
-            'product_name_core': None, 'product_variant_description': None,
-            'size_quantity_info': None, 'validation_flags': [f"LLM_ERROR: {llm_data.get('error_message', 'Unknown')}"]
-        }
+def post_process_and_validate_item_data(llm_data, price_candidates, original_collated_text, textract_blocks, item_id_for_log="N/A"):
+    """
+    Validates LLM data and, most importantly, LINKS each extracted value to its
+    source bounding box from the Textract data.
+    """
+    if "error_message" in llm_data:
+        return {'validation_flags': [f"LLM_ERROR: {llm_data.get('error_message')}"]}
 
-    item_data = llm_data.copy()
-    item_data.setdefault('validation_flags', [])
+    validated_data = {"validation_flags": []}
 
-    # --- AGENTIC CONDUCTOR LOGIC ---
-    # 1. Get the best rule-based candidates for validation purposes
-    offer_candidates = sorted([p for p in price_candidates if not p.get('is_regular_candidate')], key=lambda c: -c.get('pixel_height', 0))
-    regular_candidates = sorted([p for p in price_candidates if p.get('is_regular_candidate')], key=lambda c: -c.get('pixel_height', 0))
+    # --- 1. Link Prices to their Bboxes from Candidates ---
+    offer_price_val = parse_price_string(llm_data.get('offer_price'))
+    regular_price_val = parse_price_string(llm_data.get('regular_price'))
+
+    if offer_price_val is not None and price_candidates:
+        # Find the best candidate from the OCR that matches the LLM's price
+        best_candidate = min(price_candidates, key=lambda c: abs(c['parsed_value'] - float(offer_price_val)), default=None)
+        if best_candidate and abs(best_candidate['parsed_value'] - float(offer_price_val)) < 0.02:
+            bbox = best_candidate.get('bounding_box')
+            validated_data['offer_price'] = {"value": offer_price_val, "bbox": bbox}
+
+    if regular_price_val is not None and price_candidates:
+        best_candidate = min(price_candidates, key=lambda c: abs(c['parsed_value'] - float(regular_price_val)), default=None)
+        if best_candidate and abs(best_candidate['parsed_value'] - float(regular_price_val)) < 0.02:
+            bbox = best_candidate.get('bounding_box')
+            validated_data['regular_price'] = {"value": regular_price_val, "bbox": bbox}
     
-    best_rule_offer = offer_candidates[0]['parsed_value'] if offer_candidates else None
-    best_rule_regular = regular_candidates[0]['parsed_value'] if regular_candidates else None
-
-    # 2. VALIDATE Offer Price
-    llm_offer_price = item_data.get('offer_price')
-    if llm_offer_price is None:
-        if best_rule_offer is not None:
-            item_data['offer_price'] = best_rule_offer
-            item_data['validation_flags'].append(f"PRICE_FALLBACK: LLM found no offer price, using rule-based fallback ${best_rule_offer}")
-    elif best_rule_offer is not None and abs(llm_offer_price - best_rule_offer) > 0.01:
-        item_data['validation_flags'].append(f"PRICE_MISMATCH: LLM found offer ${llm_offer_price}, but rules suggest ${best_rule_offer}. Trusting LLM.")
-
-    # 3. VALIDATE Regular Price
-    llm_regular_price = item_data.get('regular_price')
-    if llm_regular_price is None:
-        if best_rule_regular is not None:
-            item_data['regular_price'] = best_rule_regular
-            item_data['validation_flags'].append(f"PRICE_FALLBACK: LLM found no regular price, using rule-based fallback ${best_rule_regular}")
-    elif best_rule_regular is not None and abs(llm_regular_price - best_rule_regular) > 0.01:
-        item_data['validation_flags'].append(f"PRICE_MISMATCH: LLM found regular ${llm_regular_price}, but rules suggest ${best_rule_regular}. Trusting LLM.")
-        
-    # 4. Final Sanity Check: Ensure offer price is not higher than regular price
-    op, rp = item_data.get('offer_price'), item_data.get('regular_price')
-    if op is not None and rp is not None and float(op) > float(rp):
-        item_data['offer_price'], item_data['regular_price'] = rp, op
-        item_data['validation_flags'].append(f"PRICE_LOGIC_SWAP: Offer price ${op} was > regular price ${rp}, swapped them.")
-
-    # Size processing remains minimal as requested
-    raw_size_info = item_data.get('size_quantity_info')
-    item_data['size_quantity_info'] = str(raw_size_info).strip() if raw_size_info is not None else None
-    if not item_data.get('size_quantity_info'):
-        item_data['validation_flags'].append('SIZE_INFO_MISSING')
-
-    logger.debug(f"ITEM_ID: {item_id_for_log} - Post-processing complete. Final data: Offer: {item_data.get('offer_price')}, Reg: {item_data.get('regular_price')}, Flags: {item_data['validation_flags']}")
+    # --- 2. Link Text Fields to their Bboxes using the find_bbox_for_text function ---
+    fields_to_link = ["product_brand", "product_name_core", "product_variant_description", "size_quantity_info"]
+    for field in fields_to_link:
+        field_text = llm_data.get(field)
+        if field_text:
+            # Here we use the robust search to find the bbox just once.
+            bbox = find_bbox_for_text(str(field_text), textract_blocks)
+            if bbox:
+                validated_data[field] = {"value": field_text, "bbox": bbox}
+            else:
+                 # If we can't find it, we still store the value but with no bbox
+                validated_data[field] = {"value": field_text, "bbox": None}
     
-    return item_data
+    # --- 3. Final Sanity Checks (Example: Swapping prices) ---
+    op_data = validated_data.get('offer_price')
+    rp_data = validated_data.get('regular_price')
 
-from fuzzywuzzy import fuzz
+    if op_data and rp_data and op_data['value'] > rp_data['value']:
+        validated_data['offer_price'], validated_data['regular_price'] = rp_data, op_data
+        validated_data['validation_flags'].append("PRICE_LOGIC_SWAP")
+
+    # Add other fields that don't need a bbox
+    for key in ["unit_indicator", "store_specific_terms", "vision_llm_used"]:
+        if key in llm_data:
+            validated_data[key] = llm_data[key]
+
+    return validated_data
 
 
 
 
-
-# REPLACE this function in backend_processor.py
+# REPLACE the entire compare_product_items function with this corrected version
 
 def compare_product_items(product_items1, product_items2, similarity_threshold=70):
     logger.info(f"COMPARE_FN - Starting comparison: {len(product_items1)} items from File1 with {len(product_items2)} items from File2.")
     comparison_report = []
     matched_item2_indices = set()
     
+    # Threshold for considering text fields a match (e.g., 95% similar)
     FUZZY_MATCH_THRESHOLD = 95
 
     def normalize_text_for_comparison(text):
-        """Removes whitespace and punctuation for robust fuzzy matching."""
-        if not text:
-            return ""
-        return re.sub(r'[\s\W_]+', '', text).lower()
+        if not text: return ""
+        return re.sub(r'[\s\W_]+', '', str(text)).lower()
 
     for idx1, item1 in enumerate(product_items1):
         item1_id_log = item1.get("product_box_id", f"File1-Item{idx1}")
         
+        brand1 = str(item1.get("product_brand", {}).get("value", "")).lower().strip()
+        name_core1 = str(item1.get("product_name_core", {}).get("value", "")).lower().strip()
+        primary_text1 = f"{brand1} {name_core1}".strip()
+        variant1 = str(item1.get("product_variant_description", {}).get("value", "")).lower().strip()
+        
+        if not primary_text1:
+            logger.warning(f"COMPARE_FN - {item1_id_log} has no primary text for matching. Skipping.")
+            comparison_report.append({"Comparison_Type": "Unmatchable Product in File 1 (No Text)", "P1_Box_ID": item1_id_log, "Differences": "Missing core product text."})
+            continue
+
         best_match_item2 = None
         highest_similarity = 0.0
         best_match_idx = -1
-        
-        brand1 = str(item1.get("product_brand", "") or "").lower().strip()
-        name_core1 = str(item1.get("product_name_core", "") or "").lower().strip()
-        primary_text1 = f"{brand1} {name_core1}".strip()
-        variant1 = str(item1.get("product_variant_description", "") or "").lower().strip()
-        
-        if not primary_text1 and not variant1:
-            logger.warning(f"COMPARE_FN - {item1_id_log} has no text for matching. Skipping.")
-            # ... (code for unmatchable item)
-            continue
 
         for idx2, item2 in enumerate(product_items2):
             if idx2 in matched_item2_indices: continue
 
-            brand2 = str(item2.get("product_brand", "") or "").lower().strip()
-            name_core2 = str(item2.get("product_name_core", "") or "").lower().strip()
+            brand2 = str(item2.get("product_brand", {}).get("value", "")).lower().strip()
+            name_core2 = str(item2.get("product_name_core", {}).get("value", "")).lower().strip()
             primary_text2 = f"{brand2} {name_core2}".strip()
-            variant2 = str(item2.get("product_variant_description", "") or "").lower().strip()
+            variant2 = str(item2.get("product_variant_description", {}).get("value", "")).lower().strip()
 
-            if not primary_text2 and not variant2:
-                continue
+            if not primary_text2: continue
             
             primary_similarity = fuzz.token_set_ratio(primary_text1, primary_text2)
-            secondary_similarity = fuzz.token_set_ratio(variant1, variant2) if variant1 and variant2 else 0
-            current_pair_similarity = (primary_similarity * 0.7) + (secondary_similarity * 0.3)
+            secondary_similarity = fuzz.token_set_ratio(variant1, variant2) if variant1 and variant2 else 100
+            current_pair_similarity = (primary_similarity * 0.8) + (secondary_similarity * 0.2)
             
             if current_pair_similarity > highest_similarity:
                 highest_similarity = current_pair_similarity
@@ -1091,73 +1100,46 @@ def compare_product_items(product_items1, product_items2, similarity_threshold=7
             best_match_item2_id_log = best_match_item2.get("product_box_id", f"File2-Item{best_match_idx}")
             
             diff_details = []
-            
-            op1 = item1.get("offer_price")
-            op2 = best_match_item2.get("offer_price")
-            rp1 = item1.get("regular_price")
-            rp2 = best_match_item2.get("regular_price")
             price_tolerance = 0.01
-
-            if (op1 is not None and op2 is not None and abs(float(op1) - float(op2)) > price_tolerance) or (op1 is None) != (op2 is None):
+            
+            # Price Comparison
+            op1 = item1.get("offer_price", {}).get("value")
+            op2 = best_match_item2.get("offer_price", {}).get("value")
+            if (op1 is not None and op2 is not None and abs(op1 - op2) > price_tolerance) or ((op1 is None) != (op2 is None)):
                 diff_details.append(f"Offer Price: F1=${op1 if op1 is not None else 'N/A'} vs F2=${op2 if op2 is not None else 'N/A'}")
 
-            if (rp1 is not None and rp2 is not None and abs(float(rp1) - float(rp2)) > price_tolerance) or (rp1 is None) != (rp2 is None):
+            rp1 = item1.get("regular_price", {}).get("value")
+            rp2 = best_match_item2.get("regular_price", {}).get("value")
+            if (rp1 is not None and rp2 is not None and abs(rp1 - rp2) > price_tolerance) or ((rp1 is None) != (rp2 is None)):
                 diff_details.append(f"Regular Price: F1=${rp1 if rp1 is not None else 'N/A'} vs F2=${rp2 if rp2 is not None else 'N/A'}")
 
-            p1_size_norm = normalize_text_for_comparison(item1.get("size_quantity_info"))
-            p2_size_norm = normalize_text_for_comparison(best_match_item2.get("size_quantity_info"))
-            if fuzz.ratio(p1_size_norm, p2_size_norm) < FUZZY_MATCH_THRESHOLD:
-                diff_details.append(f"Size: F1='{item1.get('size_quantity_info') or 'N/A'}' vs F2='{best_match_item2.get('size_quantity_info') or 'N/A'}'")
-
-            p1_variant_norm = normalize_text_for_comparison(item1.get("product_variant_description"))
-            p2_variant_norm = normalize_text_for_comparison(best_match_item2.get("product_variant_description"))
-            if fuzz.ratio(p1_variant_norm, p2_variant_norm) < FUZZY_MATCH_THRESHOLD:
-                 diff_details.append(f"Variant: F1='{item1.get('product_variant_description') or 'N/A'}' vs F2='{best_match_item2.get('product_variant_description') or 'N/A'}'")
-
-
-            base_report_item = {
-                "P1_Brand": item1.get("product_brand"), "P1_Name_Core": item1.get("product_name_core"),
-                "P1_Variant": item1.get("product_variant_description"), "P1_Size_Orig": item1.get("size_quantity_info"),
-                "P1_Offer_Price": op1, "P1_Regular_Price": rp1,
-                "P1_Val_Flags": "; ".join(item1.get("validation_flags", [])),
-                "P1_Box_ID": item1_id_log,
-                "P2_Brand": best_match_item2.get("product_brand"), "P2_Name_Core": best_match_item2.get("product_name_core"),
-                "P2_Variant": best_match_item2.get("product_variant_description"), "P2_Size_Orig": best_match_item2.get("size_quantity_info"),
-                "P2_Offer_Price": op2, "P2_Regular_Price": rp2,
-                "P2_Val_Flags": "; ".join(best_match_item2.get("validation_flags", [])),
-                "P2_Box_ID": best_match_item2_id_log,
-                "Similarity_Percent": round(highest_similarity, 1),
-            }
+            # --- FUZZY LOGIC FOR TEXT FIELDS ---
+            size1_val = item1.get("size_quantity_info", {}).get("value")
+            size2_val = best_match_item2.get("size_quantity_info", {}).get("value")
+            if fuzz.ratio(normalize_text_for_comparison(size1_val), normalize_text_for_comparison(size2_val)) < FUZZY_MATCH_THRESHOLD:
+                diff_details.append(f"Size: F1='{size1_val or 'N/A'}' vs F2='{size2_val or 'N/A'}'")
             
+            variant1_val = item1.get("product_variant_description", {}).get("value")
+            variant2_val = best_match_item2.get("product_variant_description", {}).get("value")
+            if fuzz.ratio(normalize_text_for_comparison(variant1_val), normalize_text_for_comparison(variant2_val)) < FUZZY_MATCH_THRESHOLD:
+                diff_details.append(f"Variant: F1='{variant1_val or 'N/A'}' vs F2='{variant2_val or 'N/A'}'")
+
+
+            base_report_item = { "P1_Box_ID": item1_id_log, "P2_Box_ID": best_match_item2_id_log, "Similarity_Percent": round(highest_similarity, 1) }
+
             if diff_details:
                 comparison_report.append({"Comparison_Type": "Product Match - Attribute Mismatch", **base_report_item, "Differences": "; ".join(diff_details)})
             else:
                 comparison_report.append({"Comparison_Type": "Product Match - Attributes OK", **base_report_item, "Differences": ""})
         else:
-            comparison_report.append({
-                "Comparison_Type": "Unmatched Product in File 1",
-                "P1_Brand": item1.get("product_brand"), "P1_Name_Core": item1.get("product_name_core"),
-                 "P1_Variant": item1.get("product_variant_description"), "P1_Size_Orig": item1.get("size_quantity_info"),
-                "P1_Offer_Price": item1.get("offer_price"), "P1_Regular_Price": item1.get("regular_price"),
-                "P1_Val_Flags": "; ".join(item1.get("validation_flags", [])),
-                "P1_Box_ID": item1_id_log,
-            })
+            comparison_report.append({"Comparison_Type": "Unmatched Product in File 1", "P1_Box_ID": item1_id_log})
     
     for idx2, item2 in enumerate(product_items2):
         if idx2 not in matched_item2_indices:
-            item2_id_log = item2.get("product_box_id", f"File2-Item{idx2}")
-            comparison_report.append({
-                "Comparison_Type": "Unmatched Product in File 2 (Extra)",
-                "P2_Brand": item2.get("product_brand"), "P2_Name_Core": item2.get("product_name_core"),
-                "P2_Variant": item2.get("product_variant_description"), "P2_Size_Orig": item2.get("size_quantity_info"),
-                "P2_Offer_Price": item2.get("offer_price"), "P2_Regular_Price": item2.get("regular_price"),
-                 "P2_Val_Flags": "; ".join(item2.get("validation_flags", [])),
-                "P2_Box_ID": item2_id_log,
-            })
+            comparison_report.append({"Comparison_Type": "Unmatched Product in File 2 (Extra)", "P2_Box_ID": item2.get("product_box_id", f"File2-Item{idx2}")})
             
     logger.info(f"COMPARE_FN - Comparison finished. Report items: {len(comparison_report)}")
     return comparison_report
-
 # ADD this new function to backend_processor.py
 
 def run_vision_review_for_pair(item1, item2, page_pil_file1, page_pil_file2):
@@ -1320,7 +1302,164 @@ def draw_highlights_on_full_page_v2(full_page_pil_image: Image.Image,
 
 
 
-# REPLACE this function in backend_processor.py
+# REPLACE the entire draw_detailed_highlights function with this improved version.
+
+def draw_detailed_highlights(full_page_pil_image: Image.Image,
+                             all_items_on_page: list,
+                             page_comparison_report_items: list,
+                             file_type: str) -> BytesIO:
+    """
+    Draws highlights and labels based on the new "linked" data architecture.
+    - Labels are drawn for all issue categories.
+    - Highlights are drawn directly from the pre-linked bounding boxes.
+    - No fallbacks are used; if a bbox isn't linked, no highlight is drawn.
+    """
+    if full_page_pil_image.mode != 'RGBA':
+        full_page_pil_image = full_page_pil_image.convert('RGBA')
+
+    overlay = Image.new('RGBA', full_page_pil_image.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
+    
+    img_width, img_height = full_page_pil_image.size
+
+    LABEL_COLORS = {
+        "Price Issue": (217, 48, 38),
+        "Text Issue": (234, 88, 12),
+        "Photo": (126, 34, 206)
+    }
+    HIGHLIGHT_FILL = (255, 77, 77, 95)
+    COLOR_LABEL_TEXT = (255, 255, 255)
+    LABEL_BG_SHADOW = (0, 0, 0, 80)
+
+    try:
+        label_font_size = max(8, int(img_height * 0.009))
+        font_path = Path(__file__).resolve().parent / "assets" / "arialbd.ttf"
+        label_font = ImageFont.truetype(str(font_path), label_font_size)
+    except IOError:
+        logging.warning("Arial Bold font not found at 'assets/arialbd.ttf'. Using default font.")
+        label_font = ImageFont.load_default()
+
+    for report_item in page_comparison_report_items:
+        box_id_key = "P1_Box_ID" if file_type == "file1" else "P2_Box_ID"
+        box_id = report_item.get(box_id_key)
+        item_data = next((item for item in all_items_on_page if item.get("product_box_id") == box_id), None)
+        
+        if not item_data or not item_data.get("roboflow_box_coords_pixels_center_wh"):
+            continue
+
+        categories = report_item.get('issue_categories', [])
+        if not categories:
+            continue
+
+        rf_box = item_data["roboflow_box_coords_pixels_center_wh"]
+        x_min_rf, y_min_rf = int(rf_box['x'] - rf_box['width'] / 2), int(rf_box['y'] - rf_box['height'] / 2)
+
+        # --- Step 1: Draw all relevant labels ---
+        label_y_offset = y_min_rf + 4
+        for category in categories:
+            label_text = category.replace(" Issue", "").upper()
+            label_color = LABEL_COLORS.get(category, (128, 128, 128))
+            
+            try:
+                label_box = draw.textbbox((0,0), label_text, font=label_font)
+                label_width, label_height = label_box[2] - label_box[0], label_box[3] - label_box[1]
+                
+                shadow_coords = [x_min_rf + 3, label_y_offset - 2, x_min_rf + 3 + label_width + 10, label_y_offset + label_height + 8]
+                draw.rectangle(shadow_coords, fill=LABEL_BG_SHADOW)
+
+                bg_coords = [x_min_rf + 4, label_y_offset - 1, x_min_rf + 4 + label_width + 8, label_y_offset + label_height + 6]
+                draw.rectangle(bg_coords, fill=label_color)
+
+                draw.text((x_min_rf + 8, label_y_offset + 2), label_text, font=label_font, fill=COLOR_LABEL_TEXT)
+                
+                label_y_offset += label_height + 12
+            except Exception as e:
+                logging.error(f"Error drawing label for {box_id}: {e}")
+
+        # --- Step 2: Draw highlights directly from linked bboxes ---
+        if "Text Issue" in categories or "Price Issue" in categories:
+            differences = report_item.get("Differences", "").split(';')
+            for diff in differences:
+                diff_attr_name = diff.split(':')[0].strip()
+                
+                field_key_map = {
+                    "Offer Price": "offer_price", "Regular Price": "regular_price",
+                    "Size": "size_quantity_info", "Variant": "product_variant_description",
+                    "Name": "product_name_core", "Brand": "product_brand"
+                }
+                field_key = field_key_map.get(diff_attr_name)
+
+                if field_key and field_key in item_data and isinstance(item_data[field_key], dict) and item_data[field_key].get("bbox"):
+                    bbox = item_data[field_key]["bbox"]
+                    
+                    if 'Left' in bbox: # It's a price bbox from price_candidates
+                        px_coords = (int(bbox['Left'] * img_width), int(bbox['Top'] * img_height),
+                                     int((bbox['Left'] + bbox['Width']) * img_width), int((bbox['Top'] + bbox['Height']) * img_height))
+                    else: # It's a text bbox from find_bbox_for_text
+                        px_coords = (int(bbox['x_min'] * img_width), int(bbox['y_min'] * img_height),
+                                     int(bbox['x_max'] * img_width), int(bbox['y_max'] * img_height))
+                    
+                    draw.rectangle(px_coords, fill=HIGHLIGHT_FILL)
+
+    final_image = Image.alpha_composite(full_page_pil_image, overlay)
+    
+    img_byte_arr = BytesIO()
+    final_image.convert("RGB").save(img_byte_arr, format='JPEG', quality=95)
+    img_byte_arr.seek(0)
+    return img_byte_arr
+
+def find_bbox_for_text(text_to_find, textract_blocks, fuzz_threshold=85):
+    """
+    Finds a merged bounding box for a phrase by locating its constituent words
+    within a list of Textract WORD blocks and merging their geometries.
+    """
+    if not text_to_find or not textract_blocks:
+        return None
+
+    # Clean and split the target phrase into individual words
+    target_words = str(text_to_find).lower().strip().split()
+    if not target_words:
+        return None
+
+    found_bboxes = []
+    # Create a lookup for faster access to word blocks
+    word_blocks = [block for block in textract_blocks if block.get('BlockType') == 'WORD']
+
+    # Find bounding boxes for each word in the target phrase
+    for word in target_words:
+        best_match_block = None
+        highest_score = 0
+        for block in word_blocks:
+            block_text = block.get('Text', '').lower()
+            # Use a high threshold to find near-exact word matches
+            score = fuzz.ratio(word, block_text)
+            if score > highest_score:
+                highest_score = score
+                best_match_block = block
+
+        if best_match_block and highest_score >= fuzz_threshold:
+            bbox = best_match_block.get('Geometry', {}).get('BoundingBox')
+            if bbox:
+                found_bboxes.append(bbox)
+
+    if not found_bboxes:
+        logger.warning(f"find_bbox_for_text could not find any matching words for phrase: '{text_to_find}'")
+        return None
+
+    # Merge the bounding boxes of all found words
+    x_min = min(b['Left'] for b in found_bboxes)
+    y_min = min(b['Top'] for b in found_bboxes)
+    x_max = max(b['Left'] + b['Width'] for b in found_bboxes)
+    y_max = max(b['Top'] + b['Height'] for b in found_bboxes)
+
+    merged_bbox = {
+        'x_min': x_min,
+        'y_min': y_min,
+        'x_max': x_max,
+        'y_max': y_max
+    }
+    logger.debug(f"Successfully found and merged bbox for '{text_to_find}': {merged_bbox}")
+    return merged_bbox
 
 def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_name):
     request_id = f"req_{int(time.time())}"
@@ -1329,8 +1468,8 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
     all_files_data = []
     temp_pdf_paths_to_cleanup = []
 
-    # --- Phase 1: Initial Text-Based Extraction ---
     try:
+        # --- PHASE 1: Data Extraction for Both Files ---
         for file_idx_num, (file_bytes_content, original_filename) in enumerate(
             [(file1_bytes, file1_name), (file2_bytes, file2_name)]
         ):
@@ -1341,7 +1480,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
             items_for_this_file = []
             page_pils_for_this_file = []
 
-            # Convert PDF/Image to PIL images
             if original_filename.lower().endswith(".pdf"):
                 fd, temp_pdf_path = tempfile.mkstemp(suffix=".pdf")
                 os.close(fd)
@@ -1359,7 +1497,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 page_id_log = f"{file_id_log_prefix}-Page{page_idx}"
                 image_width_px, image_height_px = page_image_pil.size
 
-                # Upload page to S3 for Textract
                 img_byte_arr_s3 = BytesIO()
                 page_image_pil.save(img_byte_arr_s3, format='JPEG', quality=90)
                 img_byte_arr_s3.seek(0)
@@ -1367,7 +1504,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                 upload_to_s3(img_byte_arr_s3, S3_BUCKET_NAME, s3_page_key)
                 s3_keys_for_this_file.append(s3_page_key)
 
-                # Run Textract and Roboflow
                 textract_blocks = get_analysis_from_document_via_textract(S3_BUCKET_NAME, s3_page_key)
                 roboflow_preds = get_roboflow_predictions_sdk(page_image_pil, f"{s3_safe_filename_part}_p{page_idx}")
 
@@ -1380,8 +1516,20 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
 
                 for snippet in collated_snippets:
                     item_id_for_log = snippet.get("product_box_id")
-                    llm_output = extract_product_data_with_llm(snippet["collated_text"], item_id_for_log)
-                    processed_item = post_process_and_validate_item_data(llm_output, snippet["price_candidates"], snippet["collated_text"], item_id_for_log)
+                    
+                    llm_output = extract_product_data_with_llm(
+                        snippet["collated_text"],
+                        item_id_for_log,
+                        textract_blocks_in_segment=snippet["textract_blocks_in_segment"]
+                    )
+                    
+                    processed_item = post_process_and_validate_item_data(
+                        llm_output, 
+                        snippet["price_candidates"], 
+                        snippet["collated_text"], 
+                        snippet["textract_blocks_in_segment"],
+                        item_id_for_log
+                    )
                     
                     items_for_this_file.append({
                         "page_idx_for_reprocessing": page_idx,
@@ -1390,7 +1538,6 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
                         **processed_item
                     })
 
-            # Clean up S3 pages for this file
             for s3_key in s3_keys_for_this_file:
                 delete_from_s3(S3_BUCKET_NAME, s3_key)
 
@@ -1405,111 +1552,218 @@ def process_files_for_comparison(file1_bytes, file1_name, file2_bytes, file2_nam
         page_pils_file1 = all_files_data[0]["page_pils"]
         page_pils_file2 = all_files_data[1]["page_pils"]
 
-        logger.info(f"REQUEST_ID: {request_id} - Initial text-based extraction complete. Running preliminary comparison...")
+        # --- PHASE 2: Comparison, Vision Review, and Data Correction ---
+        logger.info(f"REQUEST_ID: {request_id} - Running preliminary comparison...")
         preliminary_comparison_report = compare_product_items(final_product_items_file1, final_product_items_file2)
-
-        # --- Phase 2: Discrepancy-Driven Vision Review ---
-        logger.info(f"REQUEST_ID: {request_id} - Starting Discrepancy-Driven Vision Review on {len(preliminary_comparison_report)} preliminary results.")
         final_comparison_report = []
 
-        for report_item in preliminary_comparison_report:
-            is_mismatch = "Mismatch" in report_item.get("Comparison_Type", "")
-            differences = report_item.get("Differences", "")
-
-            # Define triggers for Vision Review
-            trigger_on_size = "Size:" in differences
-            trigger_on_variant = "Variant:" in differences
-            trigger_on_price = "Price:" in differences
-
-            if is_mismatch and (trigger_on_size or trigger_on_variant or trigger_on_price):
-                p1_box_id = report_item.get("P1_Box_ID")
-                p2_box_id = report_item.get("P2_Box_ID")
-                
-                item1 = next((item for item in final_product_items_file1 if item.get("product_box_id") == p1_box_id), None)
-                item2 = next((item for item in final_product_items_file2 if item.get("product_box_id") == p2_box_id), None)
-
-                if item1 and item2:
-                    page_idx1 = item1["page_idx_for_reprocessing"]
-                    page_idx2 = item2["page_idx_for_reprocessing"]
-                    
-                    vision_data = run_vision_review_for_pair(item1, item2, page_pils_file1[page_idx1], page_pils_file2[page_idx2])
-                    
-                    if vision_data:
-                        v1 = vision_data.get("item1_details", {})
-                        v2 = vision_data.get("item2_details", {})
-                        
-                        # Normalize and compare results from Vision
-                        v1_size_norm = re.sub(r'[\s\W_]+', '', str(v1.get("size_and_quantity") or "")).lower()
-                        v2_size_norm = re.sub(r'[\s\W_]+', '', str(v2.get("size_and_quantity") or "")).lower()
-                        
-                        v1_price = v1.get("offer_price")
-                        v2_price = v2.get("offer_price")
-                        
-                        prices_match_vision = (v1_price is None and v2_price is None) or \
-                                              (v1_price is not None and v2_price is not None and abs(v1_price - v2_price) < 0.02)
-                        
-                        sizes_match_vision = fuzz.ratio(v1_size_norm, v2_size_norm) >= 95
-
-                        if prices_match_vision and sizes_match_vision:
-                            logger.warning(f"VISION CORRECTION: Mismatch for {p1_box_id} resolved by vision. Original diff: {differences}")
-                            report_item["Comparison_Type"] = "Product Match - Attributes OK (Corrected by Vision)"
-                            report_item["Differences"] = ""
-                            report_item["P1_Val_Flags"] += ";VISION_CORRECTED"
-                            report_item["P2_Val_Flags"] += ";VISION_CORRECTED"
-                        else:
-                            logger.warning(f"VISION CONFIRMATION: Mismatch for {p1_box_id} confirmed by vision.")
-                            report_item["Differences"] = f"VISION CONFIRMED MISMATCH. Size: F1='{v1.get('size_and_quantity')}' vs F2='{v2.get('size_and_quantity')}'. Price: F1=${v1_price} vs F2=${v2_price}"
-                            report_item["P1_Val_Flags"] += ";VISION_CONFIRMED_MISMATCH"
-            
-            final_comparison_report.append(report_item)
-        else:
-            final_comparison_report.append(report_item) # Keep items that didn't trigger vision
-
-        # --- Phase 3: Final Report and Image Generation ---
-        # (This section is now integrated after the main loops)
         
-        # Highlighted Pages
+            
+        for report_item in preliminary_comparison_report:
+            item_data = report_item
+            p1_box_id = item_data.get("P1_Box_ID")
+            p2_box_id = item_data.get("P2_Box_ID")
+
+            # --- Step 1: Handle Matched Pairs vs. Unmatched Items ---
+            # If the item is not a matched pair, just add it to the final report and continue.
+            if not (p1_box_id and p2_box_id):
+                # You can add issue categorization for unmatched items if desired
+                # For example: item_data['issue_categories'] = ["Unmatched"]
+                final_comparison_report.append(item_data)
+                continue
+
+            # Find the full data for the matched pair
+            item1 = next((item for item in final_product_items_file1 if item.get("product_box_id") == p1_box_id), None)
+            item2 = next((item for item in final_product_items_file2 if item.get("product_box_id") == p2_box_id), None)
+
+            if not (item1 and item2):
+                final_comparison_report.append(item_data)
+                continue
+
+            # --- Step 2: Independent Vision Checks for the Matched Pair ---
+            
+            # --- Check 2a: Text/Price Correction (OpenAI Vision) ---
+            # If the initial text comparison found a mismatch, ALWAYS try to resolve it with the OpenAI model.
+            if "Mismatch" in item_data.get("Comparison_Type", ""):
+                page_idx1 = item1["page_idx_for_reprocessing"]
+                page_idx2 = item2["page_idx_for_reprocessing"]
+                vision_data = run_vision_review_for_pair(item1, item2, page_pils_file1[page_idx1], page_pils_file2[page_idx2])
+                
+                if vision_data:
+                    v1_details = vision_data.get("item1_details", {})
+                    v2_details = vision_data.get("item2_details", {})
+                    
+                    v1_price = parse_price_string(v1_details.get("offer_price"))
+                    v2_price = parse_price_string(v2_details.get("offer_price"))
+                    v1_size = str(v1_details.get("size_and_quantity") or "")
+                    v2_size = str(v2_details.get("size_and_quantity") or "")
+
+                    # Re-compare using the new data from the vision model
+                    prices_match_vision = (v1_price is not None and v2_price is not None and abs(v1_price - v2_price) < 0.02)
+                    sizes_match_vision = fuzz.ratio(v1_size, v2_size) >= 95
+
+                    if prices_match_vision and sizes_match_vision:
+                        logger.warning(f"VISION CORRECTION: Mismatch for {p1_box_id} resolved by vision.")
+                        item_data["Comparison_Type"] = "Product Match - Attributes OK (Corrected by Vision)"
+                        item_data["Differences"] = "" # Clear previous differences
+                    else:
+                        logger.warning(f"VISION CONFIRMATION: Mismatch for {p1_box_id} confirmed by vision.")
+                        confirmed_diffs = []
+                        if not prices_match_vision:
+                            confirmed_diffs.append(f"Price: F1=${v1_price or 'N/A'} vs F2=${v2_price or 'N/A'}")
+                        if not sizes_match_vision:
+                            confirmed_diffs.append(f"Size: F1='{v1_size or 'N/A'}' vs F2='{v2_size or 'N/A'}'")
+                        item_data["Differences"] = "; ".join(confirmed_diffs)
+
+            # --- Check 2b: Photo Similarity Sanity Check (HF CLIP Model) ---
+            # This check runs independently to flag if the core products appear visually different.
+            page_idx1 = item1["page_idx_for_reprocessing"]
+            page_idx2 = item2["page_idx_for_reprocessing"]
+            segment_bytes1 = get_segment_image_bytes(page_pils_file1[page_idx1], item1["roboflow_box_coords_pixels_center_wh"])
+            segment_bytes2 = get_segment_image_bytes(page_pils_file2[page_idx2], item2["roboflow_box_coords_pixels_center_wh"])
+            
+            if check_for_photo_mistake(segment_bytes1, segment_bytes2, item1["product_box_id"]):
+                current_diffs = item_data.get("Differences", "")
+                photo_diff_str = "Photo Mistake: Core products appear different."
+                if photo_diff_str not in current_diffs:
+                    item_data["Differences"] = f"{current_diffs}; {photo_diff_str}".strip('; ')
+                
+                # Ensure the type reflects there's an issue
+                if "Mismatch" not in item_data.get("Comparison_Type", ""):
+                    item_data["Comparison_Type"] = "Product Match - Attribute Mismatch"
+
+            # --- Step 3: Final Categorization for UI Highlighting ---
+            # Based on the final state of "Differences", categorize the issues.
+            final_differences = item_data.get("Differences", "")
+            categories = []
+            if "Price" in final_differences:
+                categories.append("Price Issue")
+            if any(term in final_differences for term in ["Size", "Variant", "Name", "Brand"]):
+                categories.append("Text Issue")
+            if "Photo Mistake" in final_differences:
+                categories.append("Photo")
+            
+            item_data['issue_categories'] = list(set(categories))
+            
+            final_comparison_report.append(item_data)
+
+
+        # --- PHASE 3: Final Report and Image Generation ---
+        logger.info(f"REQUEST_ID: {request_id} - Generating final report and highlighted images...")
         highlighted_pages_file1 = []
         highlighted_pages_file2 = []
-
         max_pages = max(len(page_pils_file1), len(page_pils_file2))
         for page_idx in range(max_pages):
+            report_items_on_page1 = [r for r in final_comparison_report if r.get("P1_Box_ID") and f"-Page{page_idx}-" in r["P1_Box_ID"]]
+            report_items_on_page2 = [r for r in final_comparison_report if r.get("P2_Box_ID") and f"-Page{page_idx}-" in r["P2_Box_ID"]]
+            
             if page_idx < len(page_pils_file1):
                 page_pil_copy1 = page_pils_file1[page_idx].copy()
                 items_on_page1 = [item for item in final_product_items_file1 if item["page_idx_for_reprocessing"] == page_idx]
-                report_items_on_page1 = [r for r in final_comparison_report if r.get("P1_Box_ID") and f"-Page{page_idx}-" in r["P1_Box_ID"]]
-                img_bytes1 = draw_highlights_on_full_page_v2(page_pil_copy1, items_on_page1, report_items_on_page1, "file1")
+                img_bytes1 = draw_detailed_highlights(page_pil_copy1, items_on_page1, report_items_on_page1, "file1")
                 highlighted_pages_file1.append(base64.b64encode(img_bytes1.getvalue()).decode('utf-8'))
             
             if page_idx < len(page_pils_file2):
                 page_pil_copy2 = page_pils_file2[page_idx].copy()
                 items_on_page2 = [item for item in final_product_items_file2 if item["page_idx_for_reprocessing"] == page_idx]
-                report_items_on_page2 = [r for r in final_comparison_report if r.get("P2_Box_ID") and f"-Page{page_idx}-" in r["P2_Box_ID"]]
-                img_bytes2 = draw_highlights_on_full_page_v2(page_pil_copy2, items_on_page2, report_items_on_page2, "file2")
+                img_bytes2 = draw_detailed_highlights(page_pil_copy2, items_on_page2, report_items_on_page2, "file2")
                 highlighted_pages_file2.append(base64.b64encode(img_bytes2.getvalue()).decode('utf-8'))
 
-        # CSV Report
         report_df = pd.DataFrame(final_comparison_report)
         csv_buffer = io.StringIO()
         report_df.to_csv(csv_buffer, index=False)
         csv_data_string = csv_buffer.getvalue()
+        
+          # --- NEW: Calculate Final Summary Metrics ---
+        price_mistakes = 0
+        text_mistakes = 0
+        photo_mistakes = 0
+        
+        # Use a set to count unique items with discrepancies
+        items_with_discrepancies = set()
+
+        for item in final_comparison_report:
+            categories = item.get('issue_categories', [])
+            if categories:
+                # Add the item's ID to the set. The final count will be the size of this set.
+                # We use P1_Box_ID as the unique identifier for a comparison pair.
+                if item.get("P1_Box_ID"):
+                    items_with_discrepancies.add(item["P1_Box_ID"])
+
+                if "Price Issue" in categories:
+                    price_mistakes += 1
+                if "Text Issue" in categories:
+                    text_mistakes += 1
+                if "Photo Mistake" in categories:
+                    photo_mistakes += 1
+
+        detailed_summary = {
+            "total_mistakes": len(items_with_discrepancies),
+            "price_mistakes": price_mistakes,
+            "text_mistakes": text_mistakes,
+            "photo_mistakes": photo_mistakes,
+        }
+        # --- END OF NEW SUMMARY LOGIC ---
 
         return {
-            "message": "Processing complete with Discrepancy-Driven Vision Review.",
+            "message": "Processing complete.",
             "product_comparison_details": final_comparison_report,
             "report_csv_data": csv_data_string,
             "highlighted_pages_file1": highlighted_pages_file1,
             "highlighted_pages_file2": highlighted_pages_file2,
             "all_product_details_file1": final_product_items_file1,
-            "all_product_details_file2": final_product_items_file2
+            "all_product_details_file2": final_product_items_file2,
+            "detailed_summary": detailed_summary
         }
-
     finally:
-        # Cleanup temp files
         for temp_path in temp_pdf_paths_to_cleanup:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         logger.info(f"REQUEST_ID: {request_id} - process_files_for_comparison endpoint finished.")
+        
+        
+# In visual_layout_backend.py
+# ADD this entire new function to your file.
+
+def check_for_photo_mistake(segment_bytes1: BytesIO, segment_bytes2: BytesIO, item_id_for_log="N/A") -> bool:
+    """
+    Uses a local, open-source CLIP model to determine if the core products in two images are different.
+    Returns True if images are likely different, False otherwise.
+    """
+    if not vision_model or not vision_processor or not segment_bytes1 or not segment_bytes2:
+        logger.warning(f"ITEM_ID: {item_id_for_log} - Vision model/processor not available. Skipping photo mistake check.")
+        return False
+
+    try:
+        # Reset buffer position just in case
+        segment_bytes1.seek(0)
+        segment_bytes2.seek(0)
+        
+        image1 = Image.open(segment_bytes1)
+        image2 = Image.open(segment_bytes2)
+
+        # Process images and get their vector embeddings
+        inputs = vision_processor(images=[image1, image2], return_tensors="pt", padding=True)
+        with torch.no_grad():
+            image_features = vision_model.get_image_features(**inputs)
+
+        # Normalize the features and calculate cosine similarity
+        image_features /= image_features.norm(p=2, dim=-1, keepdim=True)
+        similarity = (image_features[0] @ image_features[1].T).item()
+        
+        # Define a threshold for what is considered a "different" image
+        # You can tune this threshold. Lower means more tolerant.
+        SIMILARITY_THRESHOLD = 0.7
+
+        logger.info(f"ITEM_ID: {item_id_for_log} - Photo similarity check score: {similarity:.4f} (Threshold: {SIMILARITY_THRESHOLD})")
+
+        # If similarity is below the threshold, they are considered different products.
+        return similarity < SIMILARITY_THRESHOLD
+
+    except Exception as e:
+        logger.error(f"ITEM_ID: {item_id_for_log} - Error during local photo mistake check: {e}", exc_info=True)
+        return False
+
 
 # If you want to test this module directly (optional)
 if __name__ == '__main__':
